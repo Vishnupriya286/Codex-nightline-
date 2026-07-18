@@ -100,6 +100,7 @@ const defaultData = {
   activeMode: 'personal',
   aiProvider: 'demo',
   ollamaModel: '',
+  ollamaHost: 'http://127.0.0.1:11434',
   profileName: 'Vishnu',
   focusContextId: '',
   aiUsage: { provider: 'demo', callsThisSession: 0, lastAnalysisAt: null },
@@ -1416,15 +1417,23 @@ function SettingsScreen({ data, update, mutate, exportData, importData, clearDem
   const [ollamaStatus, setOllamaStatus] = useState('')
   const [models, setModels] = useState([])
   const checkOllama = async () => {
-    try {
-      const res = await fetch('http://localhost:11434/api/tags')
-      const json = await res.json()
-      setModels(json.models?.map((entry) => entry.name) || [])
-      setOllamaStatus('Ollama connected.')
-    } catch {
-      update({ aiProvider: 'demo' })
-      setOllamaStatus('Local AI unavailable. Echo is using demo intelligence.')
+    const hosts = [...new Set([data.ollamaHost || defaultData.ollamaHost, 'http://127.0.0.1:11434', 'http://localhost:11434'].map(normalizeOllamaHost))]
+    for (const host of hosts) {
+      try {
+        const res = await fetch(`${host}/api/tags`)
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const json = await res.json()
+        const names = json.models?.map((entry) => entry.name) || []
+        setModels(names)
+        update({ aiProvider: 'ollama', ollamaHost: host, ollamaModel: data.ollamaModel || preferredOllamaModel(names) || names[0] || '' })
+        setOllamaStatus(names.length ? `Ollama connected at ${host}.` : `Ollama is running at ${host}, but no models were returned.`)
+        return
+      } catch {
+        // Try the next common host.
+      }
     }
+    setModels([])
+    setOllamaStatus('Could not reach Ollama. Start Ollama, then check again. On Windows, open the Ollama app or run `ollama serve`; Echo expects the API at http://127.0.0.1:11434.')
   }
   return (
     <>
@@ -1433,6 +1442,7 @@ function SettingsScreen({ data, update, mutate, exportData, importData, clearDem
         <Panel title="Profile" icon={Settings}><Label label="Name"><input value={data.profileName} onChange={(e) => update({ profileName: e.target.value })} /></Label></Panel>
         <Panel title="AI Engine" icon={Sparkles}>
           <div className="chips">{['demo', 'ollama', 'openai'].map((provider) => <button key={provider} className={data.aiProvider === provider ? 'chip active' : 'chip'} onClick={() => update({ aiProvider: provider })}>{provider === 'demo' ? 'Demo AI' : provider === 'ollama' ? 'Local AI with Ollama' : 'OpenAI'}</button>)}</div>
+          {data.aiProvider === 'ollama' && <Label label="Ollama API URL"><input value={data.ollamaHost || defaultData.ollamaHost} onChange={(e) => update({ ollamaHost: e.target.value })} placeholder="http://127.0.0.1:11434" /></Label>}
           <button className="secondary" onClick={checkOllama}><RefreshCw size={16} />Check Ollama connection</button>
           {ollamaStatus && <p className="summary">{ollamaStatus}</p>}
           {models.length > 0 && <Label label="Installed model"><select value={data.ollamaModel} onChange={(e) => update({ ollamaModel: e.target.value })}>{models.map((model) => <option key={model}>{model}</option>)}</select></Label>}
@@ -2106,9 +2116,10 @@ async function extractContext(text, data, mode, sourceType) {
 async function tryOllamaContextExtraction(text, data, mode, sourceType) {
   if (data.aiProvider !== 'ollama' || !data.ollamaModel) return null
   try {
+    const host = normalizeOllamaHost(data.ollamaHost || defaultData.ollamaHost)
     const existingContexts = data.contexts.filter((entry) => entry.mode === mode && !entry.archived).map((entry) => entry.name).join(', ')
     const prompt = `Extract Echo context data from this ${sourceType}. Return only JSON with keys contexts, people, items. Contexts should be broad human labels, not every capitalized phrase. People should be real human names only. Items should be actionable tasks, decisions, reminders, waiting loops, or useful memories. Existing contexts: ${existingContexts}.\n\nText:\n${text.slice(0, 6000)}`
-    const response = await fetch('http://localhost:11434/api/generate', {
+    const response = await fetch(`${host}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: data.ollamaModel, prompt, stream: false, format: 'json' }),
@@ -2182,6 +2193,16 @@ function compactSummary(text) {
 
 function escapeRegExp(text) {
   return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function normalizeOllamaHost(host) {
+  const value = String(host || defaultData.ollamaHost).trim().replace(/\/+$/, '')
+  if (!value) return defaultData.ollamaHost
+  return /^https?:\/\//i.test(value) ? value : `http://${value}`
+}
+
+function preferredOllamaModel(models) {
+  return models.find((model) => /gemma/i.test(model)) || models.find((model) => /llama|mistral|qwen/i.test(model)) || ''
 }
 
 function mergeImport(data, preview, mode, sourceType, rawText) {
