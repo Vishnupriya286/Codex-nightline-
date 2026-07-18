@@ -790,7 +790,9 @@ function App() {
         <AnimatePresence mode="wait">
           {(active === 'today' || active === 'business-home') && <Page key={active}>{mode === 'personal' ? <Today data={data} items={modeItems} contexts={modeContexts} headerAction={HeaderAction} setFocus={(focusContextId) => update({ focusContextId })} openAction={setActionPanel} createReminder={createReminder} updateStatus={updateStatus} /> : <BusinessHome data={data} items={modeItems} contexts={modeContexts} headerAction={HeaderAction} />}</Page>}
           {(active === 'inbox' || active === 'business-inbox') && <Page key={active}><MindInbox mode={mode} capture={capture} setCapture={setCapture} captureType={captureType} setCaptureType={setCaptureType} submitCapture={submitCapture} draftItem={draftItem} setDraftItem={setDraftItem} saveDraft={saveDraft} contexts={modeContexts} people={data.people} /></Page>}
-          {(active === 'life-map' || active === 'business-map' || active === 'operations' || active === 'team') && <Page key={active}><LifeMap data={data} mode={mode} contexts={modeContexts} items={modeItems} selected={selectedContext} setSelectedContextId={setSelectedContextId} mapView={mapView} setMapView={setMapView} openContextEditor={setContextEditor} archiveContext={archiveContext} deleteContext={deleteContext} openAction={setActionPanel} createReminder={createReminder} /></Page>}
+          {(active === 'life-map' || active === 'business-map') && <Page key={active}><LifeMap data={data} mode={mode} contexts={modeContexts} items={modeItems} selected={selectedContext} setSelectedContextId={setSelectedContextId} mapView={mapView} setMapView={setMapView} openContextEditor={setContextEditor} archiveContext={archiveContext} deleteContext={deleteContext} openAction={setActionPanel} createReminder={createReminder} /></Page>}
+          {active === 'operations' && <Page key="operations"><BusinessSection section="Operations" contextId="biz-operations" data={data} items={modeItems} contexts={modeContexts} openAction={setActionPanel} createReminder={createReminder} updateStatus={updateStatus} /></Page>}
+          {active === 'team' && <Page key="team"><BusinessSection section="Team" contextId="biz-team" data={data} items={modeItems} contexts={modeContexts} openAction={setActionPanel} createReminder={createReminder} updateStatus={updateStatus} /></Page>}
           {active === 'loose' && <Page key="loose"><LooseEnds data={data} items={modeItems} contexts={modeContexts} openAction={setActionPanel} createReminder={createReminder} updateStatus={updateStatus} deleteTask={deleteTask} /></Page>}
           {(active === 'memory' || active === 'knowledge') && <Page key={active}><MemoryGarden mode={mode} data={data} contexts={modeContexts} addMemory={() => setMemoryEditor({ type: 'new' })} editMemory={(entry) => setMemoryEditor(entry)} waterMemory={waterMemory} deleteMemory={deleteMemory} visitMemory={visitMemory} /></Page>}
           {active === 'achievements' && <Page key="achievements"><Achievements mode={mode} achievements={achievements} /></Page>}
@@ -967,6 +969,44 @@ function BusinessHome({ items, contexts, headerAction }) {
 
 function ReminderRow({ reminder, data }) {
   return <article className="reminder-row"><strong>{reminder.title}</strong><p>{deadlineLabel(reminder.date)} {reminder.time ? `at ${reminder.time}` : ''} · {reminder.deliveryChannel === 'whatsapp' ? 'Open WhatsApp to send' : 'In-App'} · {contextNames(data.contexts, reminder.contextIds || []).join(', ')}</p></article>
+}
+
+function BusinessSection({ section, contextId, data, items, contexts, openAction, createReminder, updateStatus }) {
+  const contextItem = contexts.find((entry) => entry.id === contextId)
+  const sectionItems = items.filter((entry) => entry.contextIds.includes(contextId))
+  const open = sectionItems.filter((entry) => entry.status === 'open')
+  const waiting = sectionItems.filter((entry) => entry.status === 'waiting')
+  const decisions = sectionItems.filter((entry) => entry.itemType === 'decision' || entry.decision)
+  const people = [...new Set(sectionItems.flatMap((entry) => names(data.people, entry.peopleIds)))]
+  const reminders = data.reminders.filter((entry) => entry.mode === 'business' && entry.contextIds?.includes(contextId)).slice(0, 4)
+  return (
+    <>
+      <Header title={section} subtitle={contextItem?.description || 'Focused business context, without duplicating the full Business Map.'} />
+      <section className="stat-grid">
+        <Stat value={open.length} label="needs attention" />
+        <Stat value={waiting.length} label="waiting on others" />
+        <Stat value={decisions.length} label="decisions tracked" />
+        <Stat value={people.length} label="people involved" />
+      </section>
+      <TwoColumn>
+        <Panel title={`${section} Open Loops`} icon={Bell}>
+          {sectionItems.length ? sectionItems.map((entry) => <ActionCard key={entry.id} item={entry} data={data} openAction={openAction} createReminder={createReminder} updateStatus={updateStatus} />) : <p className="empty">No {section.toLowerCase()} items yet. Capture an update in Business Inbox.</p>}
+        </Panel>
+        <Panel title="Owners and Blockers" icon={Network}>
+          {waiting.length ? waiting.map((entry) => <Notice key={entry.id}>{entry.waitingOn || names(data.people, entry.peopleIds).join(', ') || 'Someone'} is blocking: {entry.summary}</Notice>) : <p className="empty">No blockers detected in {section}.</p>}
+          <div className="suggested-list">{people.length ? people.map((personName) => <span key={personName}>{personName}</span>) : <span>No owners attached yet</span>}</div>
+        </Panel>
+      </TwoColumn>
+      <TwoColumn>
+        <Panel title="Recent Decisions" icon={Archive}>
+          {decisions.length ? decisions.map((entry) => <Notice key={entry.id}>{entry.decision || entry.summary}</Notice>) : <p className="empty">No decisions recorded here yet.</p>}
+        </Panel>
+        <Panel title="Section Reminders" icon={CalendarPlus}>
+          {reminders.length ? reminders.map((entry) => <ReminderRow key={entry.id} reminder={entry} data={data} />) : <p className="empty">No reminders scheduled for {section}.</p>}
+        </Panel>
+      </TwoColumn>
+    </>
+  )
 }
 
 function MindInbox({ mode, capture, setCapture, captureType, setCaptureType, submitCapture, draftItem, setDraftItem, saveDraft, contexts, people }) {
