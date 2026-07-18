@@ -1060,6 +1060,14 @@ function VisualDashboard({ data, items, contexts }) {
 function EmailThreads({ mode, data, contexts, emailDraft, setEmailDraft, addEmailThread, analyzeThread }) {
   const threads = (data.emailThreads || []).filter((entry) => entry.mode === mode)
   const sample = 'From: Gregory\nTo: Vishnu\nSubject: TechX host proposal\n\nHi Vishnu,\nPlease send the final TechX host proposal before Friday.\nRegards,\nGregory'
+  const pasteFromClipboard = async () => {
+    try {
+      const value = await navigator.clipboard?.readText()
+      if (value) setEmailDraft((current) => current ? `${current}\n${value}` : value)
+    } catch {
+      setEmailDraft((current) => current || '')
+    }
+  }
   const importEmailFile = async (file) => {
     if (!file) return
     setEmailDraft(await file.text())
@@ -1086,8 +1094,8 @@ function EmailThreads({ mode, data, contexts, emailDraft, setEmailDraft, addEmai
     <>
       <Header title="Email Threads" subtitle="No fake Gmail connection here: paste real emails, upload .eml/exported text, or load samples. Echo shows the thread and can convert it into an open loop." />
       <section className="email-import-panel">
-        <textarea value={emailDraft} onChange={(event) => setEmailDraft(event.target.value)} placeholder="Paste an email thread here..." />
-        <div className="button-row"><button className="primary" onClick={saveThread}><Mail size={18} />Add Thread</button><button onClick={() => setEmailDraft(sample)}>Load Gregory Sample</button><label className="file-button"><Upload size={16} />Import .eml / text<input type="file" accept=".eml,.txt,.md" onChange={(event) => importEmailFile(event.target.files?.[0])} /></label></div>
+        <textarea value={emailDraft} onPaste={(event) => setEmailDraft(event.clipboardData.getData('text') || emailDraft)} onChange={(event) => setEmailDraft(event.target.value)} placeholder="Paste an email thread here..." />
+        <div className="button-row"><button className="primary" onClick={saveThread}><Mail size={18} />Add Thread</button><button onClick={pasteFromClipboard}><Clipboard size={16} />Paste from Clipboard</button><button onClick={() => setEmailDraft(sample)}>Load Gregory Sample</button><label className="file-button"><Upload size={16} />Import .eml / text<input type="file" accept=".eml,.txt,.md" onChange={(event) => importEmailFile(event.target.files?.[0])} /></label></div>
       </section>
       <section className="thread-grid">{threads.length ? threads.map((thread) => <EmailThreadCard key={thread.id} thread={thread} data={data} analyzeThread={analyzeThread} />) : <p className="empty">No email threads yet. Add one above to see how Echo reasons about it.</p>}</section>
     </>
@@ -1818,8 +1826,35 @@ function detectItemType(text) {
 
 function detectPeople(text, people) {
   const existing = people.filter((entry) => new RegExp(`\\b${entry.name}\\b`, 'i').test(text)).map((entry) => entry.id)
-  const properNames = [...text.matchAll(/\b[A-Z][a-z]{2,}\b/g)].map((match) => match[0]).filter((name) => !['Echo', 'IEEE', 'TechX', 'Friday', 'Monday', 'August', 'Client', 'Operations'].includes(name))
-  return { ids: [...new Set(existing)], newNames: [...new Set(properNames)].filter((name) => !people.some((entry) => entry.name === name)) }
+  const candidates = extractPersonCandidates(text)
+  return { ids: [...new Set(existing)], newNames: candidates.filter((name) => !people.some((entry) => entry.name.toLowerCase() === name.toLowerCase())) }
+}
+
+function extractPersonCandidates(text) {
+  const candidates = []
+  const pushName = (value) => {
+    const cleaned = cleanPersonName(value)
+    if (cleaned) candidates.push(cleaned)
+  }
+  text.split(/\n/).forEach((line) => {
+    const header = line.match(/^(from|to|cc|bcc):\s*(.+)$/i)
+    if (header) header[2].split(/[;,]/).forEach(pushName)
+    const greeting = line.match(/^(hi|hello|dear)\s+([^,!.\n]+)/i)
+    if (greeting) pushName(greeting[2])
+  })
+  ;[...text.matchAll(/\b(?:as|by|with|from)\s+([A-Z][a-z]+(?:\s+[A-Z][A-Za-z.]*){0,3})(?=,|\s+(?:at|from|will|takes|is|has|shares|joins))/g)].forEach((match) => pushName(match[1]))
+  return [...new Set(candidates)]
+}
+
+function cleanPersonName(value) {
+  const stopWords = new Set(['A', 'An', 'The', 'Team', 'Road', 'Innovation', 'Day', 'Date', 'Time', 'Google', 'Meet', 'Backend', 'Engineer', 'Creating', 'Winning', 'Pitch', 'Deck', 'Regards', 'Thanks', 'Hello', 'Greetings', 'Subject'])
+  const withoutEmail = String(value || '').replace(/<[^>]+>/g, '').replace(/\S+@\S+/g, '').replace(/["'`]/g, '').trim()
+  const parts = withoutEmail.split(/\s+/).map((part) => part.replace(/[^A-Za-z.]/g, '')).filter(Boolean)
+  const usable = parts.filter((part) => !stopWords.has(part))
+  if (!usable.length || usable.length > 4) return ''
+  if (usable.some((part) => ['Team', 'Road', 'Google', 'Meet'].includes(part))) return ''
+  if (!usable.every((part) => /^[A-Z][a-z]+$/.test(part) || /^[A-Z]{1,3}\.?$/.test(part))) return ''
+  return usable.join(' ')
 }
 
 function chooseContexts(text, data, mode) {
@@ -2055,15 +2090,98 @@ async function extractContext(text, data, mode, sourceType) {
       return { contexts: [], people: [], items: [] }
     }
   }
+  const llmPreview = await tryOllamaContextExtraction(text, data, mode, sourceType)
+  if (llmPreview) return llmPreview
   const peopleResult = detectPeople(text, data.people)
-  const lines = text.split(/\n|\. /).map((line) => line.trim()).filter(Boolean)
-  const contextNamesFound = [...new Set([...text.matchAll(/\b(IEEE|TechX|Events|Funding|Work|Music|Personal|Family|Travel|Health|Operations|Customers|Projects|Team|Finance|Website)\b/g)].map((match) => match[1]))]
+  const lines = normalizeImportLines(text)
+  const contextNamesFound = detectContextNames(text, data, mode)
   const contexts = contextNamesFound.map((name) => context(uid('ctx'), name, mode, /TechX|Events|Funding/.test(name) ? data.contexts.find((entry) => entry.mode === mode && entry.name === 'IEEE')?.id || null : null, colorValues[Math.floor(Math.random() * colorValues.length)], 'spark', `Imported from ${sourceType}.`))
   const people = peopleResult.newNames.map((name) => person(uid('person'), name))
   const ctxIds = contexts.map((entry) => entry.id)
   const personIds = [...peopleResult.ids, ...people.map((entry) => entry.id)]
-  const items = lines.slice(0, 8).map((line) => item(line, 'import', detectItemType(line), mode, ctxIds.length ? ctxIds : chooseContexts(line, data, mode), personIds, detectDeadline(line), line, detectDeadline(line) ? 'high' : 'medium', /(waiting|confirm|will respond|follow up)/i.test(line) ? 'waiting' : 'open', suggestedActions(detectItemType(line), detectDeadline(line), personIds)))
+  const items = lines.slice(0, 8).map((line) => item(line, 'import', detectItemType(line), mode, ctxIds.length ? ctxIds : chooseContexts(line, data, mode), personIds, detectDeadline(line), compactSummary(line), detectDeadline(line) ? 'high' : 'medium', /(waiting|confirm|will respond|follow up)/i.test(line) ? 'waiting' : 'open', suggestedActions(detectItemType(line), detectDeadline(line), personIds)))
   return { contexts, people, items }
+}
+
+async function tryOllamaContextExtraction(text, data, mode, sourceType) {
+  if (data.aiProvider !== 'ollama' || !data.ollamaModel) return null
+  try {
+    const existingContexts = data.contexts.filter((entry) => entry.mode === mode && !entry.archived).map((entry) => entry.name).join(', ')
+    const prompt = `Extract Echo context data from this ${sourceType}. Return only JSON with keys contexts, people, items. Contexts should be broad human labels, not every capitalized phrase. People should be real human names only. Items should be actionable tasks, decisions, reminders, waiting loops, or useful memories. Existing contexts: ${existingContexts}.\n\nText:\n${text.slice(0, 6000)}`
+    const response = await fetch('http://localhost:11434/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: data.ollamaModel, prompt, stream: false, format: 'json' }),
+    })
+    if (!response.ok) return null
+    const payload = await response.json()
+    const parsed = JSON.parse(payload.response || '{}')
+    return normalizeLlmPreview(parsed, data, mode, sourceType, text)
+  } catch {
+    return null
+  }
+}
+
+function normalizeLlmPreview(parsed, data, mode, sourceType, rawText) {
+  const existingContexts = data.contexts.filter((entry) => entry.mode === mode)
+  const contextNamesFound = [...new Set((parsed.contexts || []).map((entry) => typeof entry === 'string' ? entry : entry.name).filter(Boolean).map((name) => cleanContextName(name)).filter(Boolean))]
+  const contexts = contextNamesFound
+    .filter((name) => !existingContexts.some((entry) => entry.name.toLowerCase() === name.toLowerCase()))
+    .slice(0, 6)
+    .map((name) => context(uid('ctx'), name, mode, null, colorValues[Math.floor(Math.random() * colorValues.length)], 'spark', `Imported from ${sourceType}.`))
+  const contextIds = [...contexts.map((entry) => entry.id), ...existingContexts.filter((entry) => contextNamesFound.some((name) => entry.name.toLowerCase() === name.toLowerCase())).map((entry) => entry.id)]
+  const peopleNames = [...new Set((parsed.people || []).map((entry) => typeof entry === 'string' ? entry : entry.name).map(cleanPersonName).filter(Boolean))]
+  const people = peopleNames.filter((name) => !data.people.some((entry) => entry.name.toLowerCase() === name.toLowerCase())).slice(0, 10).map((name) => person(uid('person'), name))
+  const personIds = [...people.map((entry) => entry.id), ...data.people.filter((entry) => peopleNames.some((name) => entry.name.toLowerCase() === name.toLowerCase())).map((entry) => entry.id)]
+  const rawItems = Array.isArray(parsed.items) ? parsed.items : []
+  const items = rawItems.slice(0, 10).map((entry) => {
+    const summary = compactSummary(typeof entry === 'string' ? entry : entry.summary || entry.title || entry.text || rawText)
+    const deadline = detectDeadline(`${summary} ${typeof entry === 'object' ? entry.deadline || entry.date || '' : ''}`)
+    const itemType = typeof entry === 'object' && entry.type ? entry.type : detectItemType(summary)
+    return item(summary, 'import', itemType, mode, contextIds.length ? contextIds : chooseContexts(summary, data, mode), personIds, deadline, summary, deadline ? 'high' : 'medium', /(waiting|confirm|follow up|pending)/i.test(summary) ? 'waiting' : 'open', suggestedActions(itemType, deadline, personIds))
+  })
+  return { contexts, people, items }
+}
+
+function normalizeImportLines(text) {
+  const ignored = /^(from|to|cc|bcc|subject|hi|hello|dear|regards|thanks|date|time|google meet)\b|^\p{Emoji_Presentation}/iu
+  return text.split(/\n|\. /).map((line) => line.trim()).filter((line) => line.length > 12 && !ignored.test(line)).slice(0, 12)
+}
+
+function detectContextNames(text, data, mode) {
+  const known = data.contexts.filter((entry) => entry.mode === mode && new RegExp(`\\b${escapeRegExp(entry.name)}\\b`, 'i').test(text)).map((entry) => entry.name)
+  const lower = text.toLowerCase()
+  const inferred = []
+  if (mode === 'business') {
+    if (/(team|owner|developer|responsib|staff)/.test(lower)) inferred.push('Team')
+    if (/(customer|client|complaint|support)/.test(lower)) inferred.push('Customers')
+    if (/(project|website|integration|redesign)/.test(lower)) inferred.push('Projects')
+    if (/(payment|invoice|finance|refund)/.test(lower)) inferred.push('Finance')
+    if (/(vendor|delivery|stock)/.test(lower)) inferred.push('Vendors')
+    if (/(marketing|pitch|campaign|event)/.test(lower)) inferred.push('Marketing')
+  } else {
+    if (/(ieee|techx|reignite|hexabyte)/.test(lower)) inferred.push('IEEE')
+    if (/(music|practice|performance)/.test(lower)) inferred.push('Music')
+    if (/(research|paper|journal|experiment)/.test(lower)) inferred.push('Research')
+    if (/(office|client|payment|website|project)/.test(lower)) inferred.push('Work')
+    if (/(family|personal|birthday|health|trip)/.test(lower)) inferred.push('Personal')
+  }
+  return [...new Set([...known, ...inferred].map(cleanContextName).filter(Boolean))]
+}
+
+function cleanContextName(name) {
+  const cleaned = String(name || '').replace(/[^A-Za-z0-9 /&-]/g, '').trim()
+  if (!cleaned || cleaned.length > 36) return ''
+  if (/^(date|time|google meet|hi|hello|subject)$/i.test(cleaned)) return ''
+  return cleaned
+}
+
+function compactSummary(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim().slice(0, 160)
+}
+
+function escapeRegExp(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 function mergeImport(data, preview, mode, sourceType, rawText) {
