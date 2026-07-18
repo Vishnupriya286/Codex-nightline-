@@ -291,6 +291,120 @@ h2 {
   margin: 26px 0;
 }
 
+.visual-dashboard {
+  display: grid;
+  grid-template-columns: minmax(360px, 0.9fr) minmax(0, 1.1fr);
+  gap: 16px;
+  margin: 28px 0;
+}
+
+.context-orbit,
+.loop-lane,
+.email-import-panel,
+.thread-card {
+  border: 1px solid rgba(74, 66, 57, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 252, 246, 0.9);
+  box-shadow: 0 18px 42px rgba(72, 60, 44, 0.08);
+}
+
+.context-orbit {
+  position: relative;
+  min-height: 390px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at center, rgba(126, 179, 141, 0.2), transparent 34%),
+    radial-gradient(circle at 70% 26%, rgba(142, 120, 184, 0.16), transparent 26%),
+    #fffaf1;
+}
+
+.context-orbit::before,
+.context-orbit::after {
+  content: "";
+  position: absolute;
+  inset: 18%;
+  border: 1px dashed rgba(74, 66, 57, 0.18);
+  border-radius: 50%;
+}
+
+.context-orbit::after {
+  inset: 30%;
+}
+
+.orbit-center,
+.orbit-node {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  border-radius: 8px;
+  padding: 12px;
+  background: #fffdf8;
+  box-shadow: 0 14px 34px rgba(72, 60, 44, 0.14);
+  text-align: center;
+}
+
+.orbit-center {
+  left: 50%;
+  top: 50%;
+  width: 150px;
+}
+
+.orb.mini {
+  width: 38px;
+  height: 38px;
+  margin: 0 auto 8px;
+}
+
+.orbit-center small,
+.orbit-node span {
+  display: block;
+  color: #6b6258;
+  font-size: 12px;
+}
+
+.orbit-node {
+  min-width: 104px;
+  border-top: 4px solid var(--context);
+}
+
+.loop-lane {
+  padding: 18px;
+}
+
+.lane-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.lane-header span {
+  color: #6b6258;
+}
+
+.lane-item {
+  display: grid;
+  gap: 4px;
+  border-left: 4px solid #68a678;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 10px;
+  background: #f7f1e5;
+}
+
+.lane-item span {
+  width: fit-content;
+  border-radius: 999px;
+  padding: 4px 8px;
+  color: #735034;
+  background: #f6dec6;
+  font-size: 12px;
+}
+
+.lane-item small {
+  color: #6b6258;
+}
+
 .stat,
 .panel,
 .capture-box,
@@ -680,6 +794,37 @@ label span {
 .achievement-grid,
 .garden-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.thread-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.email-import-panel,
+.thread-card {
+  padding: 16px;
+}
+
+.thread-card > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.thread-card strong {
+  color: #241f1a;
+}
+
+.thread-card p {
+  margin-top: 12px;
+  color: #6b6258;
+  white-space: pre-wrap;
+  max-height: 150px;
+  overflow: auto;
 }
 
 .connector-card,
@@ -1400,6 +1545,7 @@ progress::-webkit-progress-value {
 
   .stat-grid,
   .context-grid,
+  .visual-dashboard,
   .two-column,
   .form-grid,
   .settings-grid,
@@ -1408,6 +1554,10 @@ progress::-webkit-progress-value {
   .garden-grid,
   .preview-grid,
   .balance-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .thread-grid {
     grid-template-columns: 1fr;
   }
 

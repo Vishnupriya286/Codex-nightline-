@@ -105,6 +105,26 @@ const defaultData = {
   aiUsage: { provider: 'demo', callsThisSession: 0, lastAnalysisAt: null },
   whatsappSettings: { countryCode: '91', phoneNumber: '', preferredReminderTime: '18:00', status: 'manual_send' },
   importedSources: [],
+  emailThreads: [
+    emailThread(
+      'thread-demo-gregory',
+      'personal',
+      'TechX host proposal request',
+      'Hi Vishnu,\nPlease send the final TechX host proposal before Friday.\nRegards,\nGregory',
+      ['Gregory', 'Vishnu'],
+      'ctx-ieee',
+      'open',
+    ),
+    emailThread(
+      'thread-demo-anand',
+      'personal',
+      'TechX funding status',
+      'Anand said he will confirm TechX funding Monday.\nStill waiting for approval.',
+      ['Anand', 'Vishnu'],
+      'ctx-techx',
+      'waiting',
+    ),
+  ],
   reminders: [],
   calendar: [],
   journeys: [
@@ -200,6 +220,22 @@ function person(id, name) {
 
 function connector(id, name, status, description) {
   return { id, name, status, description }
+}
+
+function emailThread(id, mode, subject, rawText, participants, contextId, status) {
+  return {
+    id,
+    mode,
+    subject,
+    rawText,
+    participants,
+    contextId,
+    status,
+    latestDecision: '',
+    suggestedNextAction: '',
+    createdAt: now(),
+    updatedAt: now(),
+  }
 }
 
 function automation(id, rule, enabled) {
@@ -310,6 +346,7 @@ function migrateData(data) {
     memories,
     aiUsage: { ...defaultData.aiUsage, ...(data.aiUsage || {}) },
     whatsappSettings: { ...defaultData.whatsappSettings, ...(data.whatsappSettings || {}) },
+    emailThreads: (data.emailThreads || defaultData.emailThreads).map((entry) => ({ ...entry, id: entry.id || uid('thread'), mode: entry.mode || 'personal', participants: entry.participants || [], status: entry.status || 'open', createdAt: entry.createdAt || now(), updatedAt: entry.updatedAt || now() })),
     journeys: data.journeys || defaultData.journeys,
     connectors: mergeById(defaultData.connectors, data.connectors || []),
     importedSources: (data.importedSources || []).map((entry) => ({ ...entry, id: entry.id || uid('source'), mode: entry.mode || 'personal' })),
@@ -509,6 +546,7 @@ function App() {
   const [selectedContextId, setSelectedContextId] = useState('')
   const [contextEditor, setContextEditor] = useState(null)
   const [memoryEditor, setMemoryEditor] = useState(null)
+  const [emailDraft, setEmailDraft] = useState('')
   const [celebration, setCelebration] = useState('')
   const [resolutionCandidate, setResolutionCandidate] = useState(null)
   const waterCooldown = useRef({})
@@ -586,6 +624,18 @@ function App() {
     setDraftItem(null)
     setCapture('')
     setToast('Captured. Echo will keep the context with it.')
+  }
+
+  const addEmailThread = (thread) => {
+    mutate((current) => ({ ...current, emailThreads: [thread, ...(current.emailThreads || [])] }))
+    setToast('Email thread added. Echo can analyze it into an open loop.')
+  }
+
+  const analyzeThreadToInbox = async (thread) => {
+    const extracted = await extractMemory(thread.rawText, 'email', data)
+    setDraftItem(extracted)
+    setActive(mode === 'personal' ? 'inbox' : 'business-inbox')
+    updateAiUsage()
   }
 
   const submitCapture = async () => {
@@ -793,6 +843,7 @@ function App() {
           {(active === 'life-map' || active === 'business-map') && <Page key={active}><LifeMap data={data} mode={mode} contexts={modeContexts} items={modeItems} selected={selectedContext} setSelectedContextId={setSelectedContextId} mapView={mapView} setMapView={setMapView} openContextEditor={setContextEditor} archiveContext={archiveContext} deleteContext={deleteContext} openAction={setActionPanel} createReminder={createReminder} /></Page>}
           {active === 'operations' && <Page key="operations"><BusinessSection section="Operations" contextId="biz-operations" data={data} items={modeItems} contexts={modeContexts} openAction={setActionPanel} createReminder={createReminder} updateStatus={updateStatus} /></Page>}
           {active === 'team' && <Page key="team"><BusinessSection section="Team" contextId="biz-team" data={data} items={modeItems} contexts={modeContexts} openAction={setActionPanel} createReminder={createReminder} updateStatus={updateStatus} /></Page>}
+          {active === 'email-threads' && <Page key="email-threads"><EmailThreads mode={mode} data={data} contexts={modeContexts} emailDraft={emailDraft} setEmailDraft={setEmailDraft} addEmailThread={addEmailThread} analyzeThread={analyzeThreadToInbox} /></Page>}
           {active === 'loose' && <Page key="loose"><LooseEnds data={data} items={modeItems} contexts={modeContexts} openAction={setActionPanel} createReminder={createReminder} updateStatus={updateStatus} deleteTask={deleteTask} /></Page>}
           {(active === 'memory' || active === 'knowledge') && <Page key={active}><MemoryGarden mode={mode} data={data} contexts={modeContexts} addMemory={() => setMemoryEditor({ type: 'new' })} editMemory={(entry) => setMemoryEditor(entry)} waterMemory={waterMemory} deleteMemory={deleteMemory} visitMemory={visitMemory} /></Page>}
           {active === 'achievements' && <Page key="achievements"><Achievements mode={mode} achievements={achievements} /></Page>}
@@ -817,6 +868,7 @@ function App() {
 const personalNav = [
   { key: 'today', Icon: Moon, label: 'Today' },
   { key: 'inbox', Icon: Inbox, label: 'Mind Inbox' },
+  { key: 'email-threads', Icon: Mail, label: 'Email Threads' },
   { key: 'life-map', Icon: Map, label: 'Life Map' },
   { key: 'loose', Icon: Bell, label: 'Loose Ends' },
   { key: 'memory', Icon: Flower2, label: 'Memory Garden' },
@@ -829,6 +881,7 @@ const personalNav = [
 const businessNav = [
   { key: 'business-home', Icon: BriefcaseBusiness, label: 'Business Home' },
   { key: 'business-inbox', Icon: Inbox, label: 'Business Inbox' },
+  { key: 'email-threads', Icon: Mail, label: 'Email Threads' },
   { key: 'business-map', Icon: Map, label: 'Business Map' },
   { key: 'operations', Icon: Gauge, label: 'Operations' },
   { key: 'loose', Icon: Bell, label: 'Loose Ends' },
@@ -897,6 +950,7 @@ function Today({ data, items, contexts, headerAction, setFocus, openAction, crea
         <Stat value={approaching.length} label="upcoming deadlines" />
         <Stat value={contexts.filter((entry) => !entry.parentContextId).length} label="active life contexts" />
       </section>
+      <VisualDashboard data={data} items={openItems} contexts={topContexts} />
       <TwoColumn>
         <Panel title="What needs you" icon={Moon}>
           {approaching.slice(0, 4).map((entry) => <Notice key={entry.id}>{entry.summary} · {deadlineLabel(entry.deadline)}</Notice>)}
@@ -969,6 +1023,78 @@ function BusinessHome({ items, contexts, headerAction }) {
 
 function ReminderRow({ reminder, data }) {
   return <article className="reminder-row"><strong>{reminder.title}</strong><p>{deadlineLabel(reminder.date)} {reminder.time ? `at ${reminder.time}` : ''} · {reminder.deliveryChannel === 'whatsapp' ? 'Open WhatsApp to send' : 'In-App'} · {contextNames(data.contexts, reminder.contextIds || []).join(', ')}</p></article>
+}
+
+function VisualDashboard({ data, items, contexts }) {
+  const featured = contexts.slice(0, 6)
+  const loops = items.slice(0, 5)
+  return (
+    <section className="visual-dashboard">
+      <div className="context-orbit">
+        <div className="orbit-center"><div className="orb mini"><span /></div><strong>Echo</strong><small>Context connected</small></div>
+        {featured.map((entry, index) => {
+          const angle = (index / Math.max(featured.length, 1)) * Math.PI * 2
+          const x = 50 + Math.cos(angle) * 35
+          const y = 50 + Math.sin(angle) * 34
+          const count = items.filter((itemEntry) => itemEntry.contextIds.includes(entry.id)).length
+          return <div key={entry.id} className="orbit-node" style={{ left: `${x}%`, top: `${y}%`, '--context': entry.color }}><strong>{entry.name}</strong><span>{count} loops</span></div>
+        })}
+      </div>
+      <div className="loop-lane">
+        <div className="lane-header"><span>Open-loop resolution lane</span><strong>Capture {'->'} Understand {'->'} Act {'->'} Resolve</strong></div>
+        {loops.length ? loops.map((entry) => <article key={entry.id} className="lane-item"><span>{entry.status}</span><strong>{entry.summary}</strong><small>{contextNames(data.contexts, entry.contextIds).join(', ')} · {deadlineLabel(entry.deadline)}</small></article>) : <p className="empty">Load demo data or import an email thread to see loops move through Echo.</p>}
+      </div>
+    </section>
+  )
+}
+
+function EmailThreads({ mode, data, contexts, emailDraft, setEmailDraft, addEmailThread, analyzeThread }) {
+  const threads = (data.emailThreads || []).filter((entry) => entry.mode === mode)
+  const sample = 'From: Gregory\nTo: Vishnu\nSubject: TechX host proposal\n\nHi Vishnu,\nPlease send the final TechX host proposal before Friday.\nRegards,\nGregory'
+  const importEmailFile = async (file) => {
+    if (!file) return
+    setEmailDraft(await file.text())
+  }
+  const saveThread = () => {
+    if (!emailDraft.trim()) return
+    const analyzed = analyzeEmailThread(emailDraft, data, mode)
+    addEmailThread({
+      id: analyzed.sourceId || uid('thread'),
+      mode,
+      subject: inferEmailSubject(emailDraft),
+      rawText: emailDraft,
+      participants: names(data.people, analyzed.peopleIds),
+      contextId: analyzed.contextIds[0] || contexts[0]?.id || null,
+      status: analyzed.status,
+      latestDecision: analyzed.itemType === 'decision' ? analyzed.summary : '',
+      suggestedNextAction: analyzed.summary || 'Review thread',
+      createdAt: now(),
+      updatedAt: now(),
+    })
+    setEmailDraft('')
+  }
+  return (
+    <>
+      <Header title="Email Threads" subtitle="No fake Gmail connection here: paste real emails, upload .eml/exported text, or load samples. Echo shows the thread and can convert it into an open loop." />
+      <section className="email-import-panel">
+        <textarea value={emailDraft} onChange={(event) => setEmailDraft(event.target.value)} placeholder="Paste an email thread here..." />
+        <div className="button-row"><button className="primary" onClick={saveThread}><Mail size={18} />Add Thread</button><button onClick={() => setEmailDraft(sample)}>Load Gregory Sample</button><label className="file-button"><Upload size={16} />Import .eml / text<input type="file" accept=".eml,.txt,.md" onChange={(event) => importEmailFile(event.target.files?.[0])} /></label></div>
+      </section>
+      <section className="thread-grid">{threads.length ? threads.map((thread) => <EmailThreadCard key={thread.id} thread={thread} data={data} analyzeThread={analyzeThread} />) : <p className="empty">No email threads yet. Add one above to see how Echo reasons about it.</p>}</section>
+    </>
+  )
+}
+
+function EmailThreadCard({ thread, data, analyzeThread }) {
+  const contextName = contextNames(data.contexts, [thread.contextId]).join(', ') || 'Unsorted'
+  return (
+    <article className="thread-card">
+      <div><span className={`status-pill ${thread.status === 'waiting' ? 'demo' : 'connected'}`}>{thread.status}</span><strong>{thread.subject}</strong></div>
+      <p>{thread.rawText}</p>
+      <div className="memory-meta"><span>{contextName}</span><span>{thread.participants.join(', ') || 'No participants detected'}</span><span>{format(parseISO(thread.createdAt), 'MMM d')}</span></div>
+      <div className="button-row"><button onClick={() => analyzeThread(thread)}><Sparkles size={16} />Analyze into Echo</button><button onClick={() => navigator.clipboard?.writeText(thread.rawText)}><Clipboard size={16} />Copy Source</button></div>
+    </article>
+  )
 }
 
 function BusinessSection({ section, contextId, data, items, contexts, openAction, createReminder, updateStatus }) {
@@ -1259,7 +1385,7 @@ function Connectors({ data, setImportModal }) {
   const groups = [
     ['Connected', data.connectors.filter((entry) => entry.status === 'connected')],
     ['Import-Based', data.connectors.filter((entry) => ['manual', 'local-files', 'email-import', 'whatsapp', 'keep'].includes(entry.id) && entry.status !== 'connected')],
-    ['Coming Later', data.connectors.filter((entry) => entry.status === 'coming_soon')],
+    ['Coming Later', data.connectors.filter((entry) => entry.status === 'coming_soon' && !['manual', 'local-files', 'email-import', 'whatsapp', 'keep'].includes(entry.id))],
   ]
   return (
     <>
@@ -1805,6 +1931,14 @@ function hashText(text) {
   let hash = 0
   for (let i = 0; i < text.length; i += 1) hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0
   return Math.abs(hash).toString(36)
+}
+
+function inferEmailSubject(text) {
+  const subject = text.match(/^subject:\s*(.+)$/im)?.[1]?.trim()
+  if (subject) return subject
+  if (/techx|proposal/i.test(text)) return 'TechX proposal thread'
+  if (/funding/i.test(text)) return 'Funding status thread'
+  return text.split('\n').find((line) => line.trim())?.slice(0, 72) || 'Imported email thread'
 }
 
 async function extractMemory(input, sourceType, data) {
