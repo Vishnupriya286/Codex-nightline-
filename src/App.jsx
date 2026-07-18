@@ -101,6 +101,8 @@ const defaultData = {
   aiProvider: 'demo',
   ollamaModel: '',
   ollamaHost: 'http://127.0.0.1:11434',
+  openaiModel: 'gpt-4o-mini',
+  openaiApiKey: '',
   profileName: 'Vishnu',
   focusContextId: '',
   aiUsage: { provider: 'demo', callsThisSession: 0, lastAnalysisAt: null },
@@ -1415,6 +1417,7 @@ function Connectors({ data, setImportModal }) {
 
 function SettingsScreen({ data, update, mutate, exportData, importData, clearDemo, clearAll }) {
   const [ollamaStatus, setOllamaStatus] = useState('')
+  const [openaiStatus, setOpenaiStatus] = useState('')
   const [models, setModels] = useState([])
   const checkOllama = async () => {
     const hosts = [...new Set([data.ollamaHost || defaultData.ollamaHost, 'http://127.0.0.1:11434', 'http://localhost:11434'].map(normalizeOllamaHost))]
@@ -1435,6 +1438,15 @@ function SettingsScreen({ data, update, mutate, exportData, importData, clearDem
     setModels([])
     setOllamaStatus('Could not reach Ollama. Start Ollama, then check again. On Windows, open the Ollama app or run `ollama serve`; Echo expects the API at http://127.0.0.1:11434.')
   }
+  const checkOpenAI = async () => {
+    const preview = await tryOpenAIContextExtraction('Gregory asked Vishnu to send the TechX proposal by Friday.', data, data.activeMode, 'Connection Test')
+    if (preview) {
+      update({ aiProvider: 'openai' })
+      setOpenaiStatus('OpenAI connected. Echo can use it for context extraction.')
+    } else {
+      setOpenaiStatus('OpenAI is not configured yet. Add a key here for local testing, or set OPENAI_API_KEY on the backend/Vercel.')
+    }
+  }
   return (
     <>
       <Header title="Settings" subtitle="Your Context, Your Control" />
@@ -1443,11 +1455,14 @@ function SettingsScreen({ data, update, mutate, exportData, importData, clearDem
         <Panel title="AI Engine" icon={Sparkles}>
           <div className="chips">{['demo', 'ollama', 'openai'].map((provider) => <button key={provider} className={data.aiProvider === provider ? 'chip active' : 'chip'} onClick={() => update({ aiProvider: provider })}>{provider === 'demo' ? 'Demo AI' : provider === 'ollama' ? 'Local AI with Ollama' : 'OpenAI'}</button>)}</div>
           {data.aiProvider === 'ollama' && <Label label="Ollama API URL"><input value={data.ollamaHost || defaultData.ollamaHost} onChange={(e) => update({ ollamaHost: e.target.value })} placeholder="http://127.0.0.1:11434" /></Label>}
-          <button className="secondary" onClick={checkOllama}><RefreshCw size={16} />Check Ollama connection</button>
+          {data.aiProvider === 'openai' && <div className="form-grid"><Label label="OpenAI API key"><input type="password" value={data.openaiApiKey || ''} onChange={(e) => update({ openaiApiKey: e.target.value })} placeholder="sk-..." autoComplete="off" /></Label><Label label="OpenAI model"><input value={data.openaiModel || defaultData.openaiModel} onChange={(e) => update({ openaiModel: e.target.value })} placeholder="gpt-4o-mini" /></Label></div>}
+          {data.aiProvider === 'ollama' && <button className="secondary" onClick={checkOllama}><RefreshCw size={16} />Check Ollama connection</button>}
+          {data.aiProvider === 'openai' && <button className="secondary" onClick={checkOpenAI}><RefreshCw size={16} />Check OpenAI connection</button>}
           {ollamaStatus && <p className="summary">{ollamaStatus}</p>}
+          {openaiStatus && <p className="summary">{openaiStatus}</p>}
           {models.length > 0 && <Label label="Installed model"><select value={data.ollamaModel} onChange={(e) => update({ ollamaModel: e.target.value })}>{models.map((model) => <option key={model}>{model}</option>)}</select></Label>}
           <div className="usage-panel"><strong>AI usage this session</strong><p>Provider: {data.aiProvider}</p><p>Calls: {data.aiUsage?.callsThisSession || 0}</p><p>Last analysis: {data.aiUsage?.lastAnalysisAt ? format(parseISO(data.aiUsage.lastAnalysisAt), 'PPp') : 'Not yet'}</p></div>
-          <p className="privacy">Your data stays in your browser in Demo Mode. When Ollama is selected, AI processing uses your local model if available. With cloud AI, selected content may be sent to the configured provider.</p>
+          <p className="privacy">Your data stays in your browser in Demo Mode. Ollama uses your local model when available. OpenAI uses the backend API when configured, or the browser key you enter here for local testing.</p>
         </Panel>
         <Panel title="WhatsApp Reminders" icon={Bell}>
           <p className="summary">Automatic WhatsApp sending is not configured. Echo can prepare a message and open WhatsApp for manual send.</p>
@@ -2100,7 +2115,7 @@ async function extractContext(text, data, mode, sourceType) {
       return { contexts: [], people: [], items: [] }
     }
   }
-  const llmPreview = await tryOllamaContextExtraction(text, data, mode, sourceType)
+  const llmPreview = await tryOpenAIContextExtraction(text, data, mode, sourceType) || await tryOllamaContextExtraction(text, data, mode, sourceType)
   if (llmPreview) return llmPreview
   const peopleResult = detectPeople(text, data.people)
   const lines = normalizeImportLines(text)
@@ -2113,12 +2128,53 @@ async function extractContext(text, data, mode, sourceType) {
   return { contexts, people, items }
 }
 
+async function tryOpenAIContextExtraction(text, data, mode, sourceType) {
+  if (data.aiProvider !== 'openai') return null
+  const model = data.openaiModel || defaultData.openaiModel
+  const apiKey = (data.openaiApiKey || '').trim()
+  const body = { text, mode, sourceType, model, existingContexts: data.contexts.filter((entry) => entry.mode === mode && !entry.archived).map((entry) => entry.name) }
+  try {
+    const response = await fetch('/api/openai-context', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
+      body: JSON.stringify(body),
+    })
+    if (response.ok) {
+      const parsed = await response.json()
+      return normalizeLlmPreview(parsed, data, mode, sourceType, text)
+    }
+  } catch {
+    // Local Vite dev does not serve the Vercel api route, so try direct browser mode below.
+  }
+  if (!apiKey) return null
+  try {
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: contextExtractionSystemPrompt() },
+          { role: 'user', content: contextExtractionUserPrompt(text, sourceType, body.existingContexts) },
+        ],
+      }),
+    })
+    if (!response.ok) return null
+    const payload = await response.json()
+    const parsed = JSON.parse(payload.choices?.[0]?.message?.content || '{}')
+    return normalizeLlmPreview(parsed, data, mode, sourceType, text)
+  } catch {
+    return null
+  }
+}
+
 async function tryOllamaContextExtraction(text, data, mode, sourceType) {
   if (data.aiProvider !== 'ollama' || !data.ollamaModel) return null
   try {
     const host = normalizeOllamaHost(data.ollamaHost || defaultData.ollamaHost)
     const existingContexts = data.contexts.filter((entry) => entry.mode === mode && !entry.archived).map((entry) => entry.name).join(', ')
-    const prompt = `Extract Echo context data from this ${sourceType}. Return only JSON with keys contexts, people, items. Contexts should be broad human labels, not every capitalized phrase. People should be real human names only. Items should be actionable tasks, decisions, reminders, waiting loops, or useful memories. Existing contexts: ${existingContexts}.\n\nText:\n${text.slice(0, 6000)}`
+    const prompt = `${contextExtractionSystemPrompt()}\n\n${contextExtractionUserPrompt(text, sourceType, existingContexts)}`
     const response = await fetch(`${host}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2131,6 +2187,15 @@ async function tryOllamaContextExtraction(text, data, mode, sourceType) {
   } catch {
     return null
   }
+}
+
+function contextExtractionSystemPrompt() {
+  return 'You extract structured data for Echo, a personal/business context OS. Return only JSON with keys contexts, people, and items. Contexts are broad human labels, not every capitalized phrase. People are real human names only. Items are actionable tasks, decisions, reminders, waiting loops, useful memories, or knowledge. Keep wording concise.'
+}
+
+function contextExtractionUserPrompt(text, sourceType, existingContexts) {
+  const contextList = Array.isArray(existingContexts) ? existingContexts.join(', ') : existingContexts
+  return `Source type: ${sourceType}\nExisting contexts: ${contextList || 'none'}\nReturn JSON like {"contexts":[{"name":"IEEE"}],"people":[{"name":"Gregory"}],"items":[{"summary":"Send Gregory the TechX proposal","type":"task","deadline":"2026-07-24"}]}.\n\nText:\n${text.slice(0, 6000)}`
 }
 
 function normalizeLlmPreview(parsed, data, mode, sourceType, rawText) {
