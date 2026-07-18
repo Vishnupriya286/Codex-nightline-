@@ -71,13 +71,23 @@ const echoItemSchema = z.object({
   rawText: z.string(),
   summary: z.string(),
   sourceType: z.enum(['thought', 'conversation', 'email', 'meeting', 'personal', 'import', 'file', 'unknown']),
-  itemType: z.enum(['task', 'promise', 'decision', 'follow_up', 'recommendation', 'idea', 'information', 'memory', 'knowledge']),
+  itemType: z.enum(['task', 'promise', 'decision', 'follow_up', 'waiting', 'recommendation', 'idea', 'information', 'memory', 'knowledge', 'event']),
   mode: z.enum(['personal', 'business']),
+  sourceId: z.string().nullable().optional(),
+  context: z.string().optional(),
+  subContext: z.string().nullable().optional(),
+  people: z.array(z.string()).optional(),
+  organizations: z.array(z.string()).optional(),
   contextIds: z.array(z.string()),
   peopleIds: z.array(z.string()),
   deadline: z.string().nullable(),
   action: z.string().nullable(),
+  decision: z.string().nullable().optional(),
   reason: z.string().nullable(),
+  waitingOn: z.string().nullable().optional(),
+  promisedTo: z.string().nullable().optional(),
+  relatedItemIds: z.array(z.string()).optional(),
+  confidence: z.number().optional(),
   priority: z.enum(['low', 'medium', 'high']),
   status: z.enum(['open', 'completed', 'waiting', 'snoozed']),
   suggestedActions: z.array(z.string()),
@@ -92,9 +102,27 @@ const defaultData = {
   ollamaModel: '',
   profileName: 'Vishnu',
   focusContextId: '',
+  aiUsage: { provider: 'demo', callsThisSession: 0, lastAnalysisAt: null },
+  whatsappSettings: { countryCode: '91', phoneNumber: '', preferredReminderTime: '18:00', status: 'manual_send' },
   importedSources: [],
   reminders: [],
   calendar: [],
+  journeys: [
+    {
+      id: 'journey-codex-nightline',
+      mode: 'personal',
+      title: 'Codex Nightline',
+      musicName: '',
+      audioDataUrl: null,
+      memoryIds: ['mem-1', 'mem-2'],
+      stops: [
+        { id: 'stop-1', title: 'The idea clicks', caption: 'Echo becomes a context operating system.', date: '2026-07-18', location: 'Nightline' },
+        { id: 'stop-2', title: 'TechX threads connect', caption: 'Gregory, Anand, deadlines, and reminders become visible.', date: '2026-07-18', location: 'IEEE' },
+        { id: 'stop-3', title: 'Demo-ready', caption: 'A living map, open loops, and memories in one calm place.', date: '2026-07-19', location: 'Echo' },
+      ],
+      createdAt: now(),
+    },
+  ],
   relationships: [
     { id: 'rel-ieee-travel', sourceContextId: 'ctx-ieee', targetContextId: 'ctx-travel', relationshipType: 'event logistics' },
     { id: 'rel-work-ieee', sourceContextId: 'ctx-work', targetContextId: 'ctx-ieee', relationshipType: 'proposal skills' },
@@ -147,6 +175,7 @@ const defaultData = {
   connectors: [
     connector('manual', 'Manual Import', 'connected', 'Import pasted notes, JSON, TXT, MD, and WhatsApp exports.'),
     connector('local-files', 'Local Files', 'connected', 'Upload local TXT, MD, JSON, and chat exports.'),
+    connector('email-import', 'Email Import', 'connected', 'Paste an email thread or upload .eml / exported email text.'),
     connector('gmail', 'Gmail', 'coming_soon', 'OAuth integration required. Connector available in future integration.'),
     connector('calendar', 'Google Calendar', 'coming_soon', 'OAuth integration required. Connector available in future integration.'),
     connector('keep', 'Google Keep / Notes', 'coming_soon', 'Import Notes Export or Paste Notes for now.'),
@@ -222,6 +251,12 @@ function saveData(data) {
   localStorage.setItem(STORE.data, JSON.stringify(data))
 }
 
+function mergeById(base, overrides) {
+  const merged = new Map(base.map((entry) => [entry.id, entry]))
+  overrides.forEach((entry) => merged.set(entry.id, { ...merged.get(entry.id), ...entry }))
+  return [...merged.values()]
+}
+
 function migrateData(data) {
   const contexts = (data.contexts || defaultData.contexts).map((entry) => ({
     ...entry,
@@ -273,6 +308,10 @@ function migrateData(data) {
     contexts,
     items,
     memories,
+    aiUsage: { ...defaultData.aiUsage, ...(data.aiUsage || {}) },
+    whatsappSettings: { ...defaultData.whatsappSettings, ...(data.whatsappSettings || {}) },
+    journeys: data.journeys || defaultData.journeys,
+    connectors: mergeById(defaultData.connectors, data.connectors || []),
     importedSources: (data.importedSources || []).map((entry) => ({ ...entry, id: entry.id || uid('source'), mode: entry.mode || 'personal' })),
     reminders: (data.reminders || []).map((entry) => ({ ...entry, id: entry.id || uid('reminder'), mode: entry.mode || contextMode(entry.contextIds?.[0]) })),
     calendar: (data.calendar || []).map((entry) => ({ ...entry, id: entry.id || uid('event'), mode: entry.mode || contextMode(entry.contextIds?.[0]) })),
@@ -422,6 +461,7 @@ function demoBusinessItems() {
 }
 
 function item(rawText, sourceType, itemType, mode, contextIds, peopleIds, deadline, action, priority, status, suggestedActions) {
+  const contextName = contextIds[0] || ''
   return echoItemSchema.parse({
     id: uid('item'),
     rawText,
@@ -429,11 +469,21 @@ function item(rawText, sourceType, itemType, mode, contextIds, peopleIds, deadli
     sourceType,
     itemType,
     mode,
+    sourceId: null,
+    context: contextName,
+    subContext: null,
+    people: [],
+    organizations: [],
     contextIds,
     peopleIds,
     deadline,
     action,
+    decision: itemType === 'decision' ? action : null,
     reason: status === 'waiting' ? 'You are waiting on someone.' : 'This may need your attention.',
+    waitingOn: null,
+    promisedTo: null,
+    relatedItemIds: [],
+    confidence: 0.82,
     priority,
     status,
     suggestedActions,
@@ -460,6 +510,7 @@ function App() {
   const [contextEditor, setContextEditor] = useState(null)
   const [memoryEditor, setMemoryEditor] = useState(null)
   const [celebration, setCelebration] = useState('')
+  const [resolutionCandidate, setResolutionCandidate] = useState(null)
   const waterCooldown = useRef({})
   const mode = data.activeMode
   const achievements = useMemo(() => calculateAchievements(data), [data])
@@ -529,7 +580,9 @@ function App() {
   }
 
   const saveDraft = () => {
+    const resolution = findResolutionCandidate(draftItem, data)
     mutate((current) => addExtractedItem(current, draftItem))
+    if (resolution) setResolutionCandidate({ newItem: draftItem, oldItem: resolution })
     setDraftItem(null)
     setCapture('')
     setToast('Captured. Echo will keep the context with it.')
@@ -537,24 +590,54 @@ function App() {
 
   const submitCapture = async () => {
     if (!capture.trim()) return
-    const extracted = await extractMemory(capture.trim(), captureType, data)
-    setDraftItem(extracted)
+    try {
+      const extracted = await extractMemory(capture.trim(), captureType, data)
+      setDraftItem(extracted)
+      updateAiUsage()
+    } catch (error) {
+      setDraftItem(fallbackFailedItem(capture.trim(), captureType, data, error))
+      setToast('Echo preserved the input, but structured extraction needs review.')
+    }
   }
 
   const runAsk = async () => {
     const result = await askEcho(question, data, mode, 'everything')
     setAnswer(result)
+    updateAiUsage()
   }
 
-  const createReminder = (targetItem) => {
+  const updateAiUsage = () => {
+    setData((current) => ({ ...current, aiUsage: { provider: current.aiProvider, callsThisSession: (current.aiUsage?.callsThisSession || 0) + 1, lastAnalysisAt: now() } }))
+  }
+
+  const createReminder = (targetItem, channel = 'in_app') => {
+    const personName = names(data.people, targetItem.peopleIds)[0] || ''
     mutate((current) => ({
       ...current,
       reminders: [
-        { id: uid('reminder'), title: targetItem.action || targetItem.summary, date: targetItem.deadline || format(addDays(new Date(), 1), 'yyyy-MM-dd'), priority: targetItem.priority, contextIds: targetItem.contextIds, itemId: targetItem.id },
+        {
+          id: uid('reminder'),
+          mode: targetItem.mode,
+          title: targetItem.action || targetItem.summary,
+          date: suggestedReminderDate(targetItem),
+          time: current.whatsappSettings?.preferredReminderTime || '18:00',
+          contextIds: targetItem.contextIds,
+          relatedItemId: targetItem.id,
+          person: personName,
+          deliveryChannel: channel,
+          status: channel === 'in_app' ? 'scheduled' : 'manual_send',
+          message: buildReminderMessage(targetItem, data),
+          createdAt: now(),
+        },
         ...current.reminders,
       ],
     }))
-    setToast('Reminder created locally.')
+    if (channel === 'whatsapp') {
+      setActionPanel({ type: 'whatsapp_reminder', item: targetItem })
+      setToast('WhatsApp reminder prepared for manual send.')
+    } else {
+      setToast('In-app reminder scheduled.')
+    }
   }
 
   const createCalendar = (targetItem) => {
@@ -573,6 +656,12 @@ function App() {
     if (status === 'completed' && !window.confirm('Complete this task?')) return
     mutate((current) => ({ ...current, items: current.items.map((entry) => (entry.id === id ? { ...entry, status, completedAt: status === 'completed' ? now() : entry.completedAt } : entry)) }))
     setToast(status === 'completed' ? 'Closed. That loop is handled.' : 'Echo tucked it away for later.')
+  }
+
+  const resolveLoop = (oldId) => {
+    mutate((current) => ({ ...current, items: current.items.map((entry) => entry.id === oldId ? { ...entry, status: 'completed', completedAt: now(), reason: 'Resolved by newer information.' } : entry) }))
+    setResolutionCandidate(null)
+    setToast('Echo closed the resolved loop.')
   }
 
   const saveContext = (contextValue) => {
@@ -713,6 +802,7 @@ function App() {
 
       <nav className="mobile-nav">{nav.slice(0, 5).map(({ key, Icon, label }) => <NavButton key={key} active={active === key} Icon={Icon} label={label.replace('Business ', '')} onClick={() => setActive(key)} compact />)}<NavButton active={false} Icon={MoreHorizontal} label="More" onClick={() => setActive('settings')} compact /></nav>
       <ImportModal open={importModal} close={() => setImportModal(false)} data={data} mutate={mutate} mode={mode} />
+      <ResolutionPrompt candidate={resolutionCandidate} data={data} close={() => setResolutionCandidate(null)} resolveLoop={resolveLoop} />
       <ContextEditor key={contextEditor?.id || 'context-editor'} value={contextEditor} mode={mode} contexts={modeContexts} save={saveContext} close={() => setContextEditor(null)} />
       {memoryEditor && <MemoryEditor key={memoryEditor?.id || memoryEditor?.type || 'memory-editor'} value={memoryEditor} mode={mode} contexts={modeContexts} save={addMemory} close={() => setMemoryEditor(null)} />}
       <ActionPanel panel={actionPanel} setPanel={setActionPanel} data={data} createReminder={createReminder} createCalendar={createCalendar} updateStatus={updateStatus} />
@@ -777,10 +867,12 @@ function Page({ children }) {
 function Today({ data, items, contexts, headerAction, setFocus, openAction, createReminder, updateStatus }) {
   const openItems = filteredByFocus(items.filter((entry) => entry.status !== 'completed'), data.focusContextId)
   const waiting = openItems.filter((entry) => entry.status === 'waiting')
+  const whoIsWaiting = openItems.filter((entry) => entry.peopleIds.length && entry.status === 'open')
   const approaching = openItems.filter((entry) => entry.deadline).sort((a, b) => a.deadline.localeCompare(b.deadline))
   const focusContext = contexts.find((entry) => entry.id === data.focusContextId)
   const topContexts = contexts.filter((entry) => !entry.parentContextId).slice(0, 8)
   const pastMemory = data.memories.find((entry) => entry.mode === 'personal')
+  const reminders = data.reminders.filter((entry) => entry.mode === 'personal' || !entry.mode).slice(0, 4)
   return (
     <>
       <header className="hero-copy">
@@ -804,12 +896,22 @@ function Today({ data, items, contexts, headerAction, setFocus, openAction, crea
         <Stat value={contexts.filter((entry) => !entry.parentContextId).length} label="active life contexts" />
       </section>
       <TwoColumn>
-        <Panel title="Today Briefing" icon={Moon}>
+        <Panel title="What needs you" icon={Moon}>
           {approaching.slice(0, 4).map((entry) => <Notice key={entry.id}>{entry.summary} · {deadlineLabel(entry.deadline)}</Notice>)}
           {!approaching.length && <p className="empty">No urgent deadlines. A rare quiet pocket.</p>}
         </Panel>
-        <Panel title="Echo Noticed" icon={Bell}>
-          {detectLooseEnds(items).slice(0, 5).map((entry) => <Notice key={entry.id}>{entry.reason}: {entry.summary}</Notice>)}
+        <Panel title="Who is waiting" icon={Mail}>
+          {whoIsWaiting.slice(0, 4).map((entry) => <Notice key={entry.id}>{names(data.people, entry.peopleIds).join(', ')} may be waiting: {entry.summary}</Notice>)}
+          {!whoIsWaiting.length && <p className="empty">No one is visibly waiting on you.</p>}
+        </Panel>
+      </TwoColumn>
+      <TwoColumn>
+        <Panel title="Who you are waiting on" icon={Bell}>
+          {waiting.slice(0, 4).map((entry) => <Notice key={entry.id}>{entry.waitingOn || names(data.people, entry.peopleIds).join(', ') || 'Someone'}: {entry.summary}</Notice>)}
+          {!waiting.length && <p className="empty">No external blockers found.</p>}
+        </Panel>
+        <Panel title="Echo noticed" icon={Sparkles}>
+          {detectLooseEnds(items).slice(0, 4).map((entry) => <Notice key={entry.id}>{entry.reason}: {entry.summary}</Notice>)}
         </Panel>
       </TwoColumn>
       <TwoColumn>
@@ -824,8 +926,16 @@ function Today({ data, items, contexts, headerAction, setFocus, openAction, crea
         <Panel title="Context Balance" icon={Gauge}>
           <p className="summary">Echo is tracking {contexts.length} personal contexts, {data.relationships.filter((entry) => contexts.some((ctx) => ctx.id === entry.sourceContextId)).length} relationships, and {data.people.length} people.</p>
         </Panel>
+        <Panel title="In-App Reminders" icon={Bell}>
+          {reminders.length ? reminders.map((entry) => <ReminderRow key={entry.id} reminder={entry} data={data} />) : <p className="empty">No reminders scheduled yet.</p>}
+        </Panel>
+      </TwoColumn>
+      <TwoColumn>
         <Panel title="Memory From The Past" icon={Flower2}>
           {pastMemory ? <MemoryPlant memory={pastMemory} data={data} compact /> : <p className="empty">Plant your first memory in Memory Garden.</p>}
+        </Panel>
+        <Panel title="Privacy State" icon={Sparkles}>
+          <p className="summary">AI Processing: {data.aiProvider === 'demo' ? 'Demo Intelligence' : data.aiProvider}. Local data stays in this browser unless you explicitly send selected content to a provider.</p>
         </Panel>
       </TwoColumn>
     </>
@@ -849,24 +959,34 @@ function BusinessHome({ items, contexts, headerAction }) {
       <section className="stat-grid">{summaries.map((entry) => <Stat key={entry.name} value={entry.count} label={`${entry.name.toLowerCase()} active items`} />)}</section>
       <TwoColumn>
         <Panel title="Business Briefing" icon={Gauge}>{items.slice(0, 5).map((entry) => <Notice key={entry.id}>{entry.summary}</Notice>)}</Panel>
-        <Panel title="Context Engine" icon={Network}><p className="summary">Capture customer messages, team updates, operational notes, and decisions. Echo converts them into responsibilities, deadlines, follow-ups, and knowledge.</p></Panel>
+        <Panel title="Business Daily Brief" icon={Network}><p className="summary">Needs attention: {items.filter((entry) => entry.status === 'open').length}. Waiting on others: {items.filter((entry) => entry.status === 'waiting').length}. Upcoming deadlines: {items.filter((entry) => entry.deadline).length}.</p></Panel>
       </TwoColumn>
     </>
   )
 }
 
+function ReminderRow({ reminder, data }) {
+  return <article className="reminder-row"><strong>{reminder.title}</strong><p>{deadlineLabel(reminder.date)} {reminder.time ? `at ${reminder.time}` : ''} · {reminder.deliveryChannel === 'whatsapp' ? 'Open WhatsApp to send' : 'In-App'} · {contextNames(data.contexts, reminder.contextIds || []).join(', ')}</p></article>
+}
+
 function MindInbox({ mode, capture, setCapture, captureType, setCaptureType, submitCapture, draftItem, setDraftItem, saveDraft, contexts, people }) {
   const examples = mode === 'personal'
-    ? ['Gregory asked me to send the TechX proposal before Friday.', 'Anand said he will confirm the TechX funding status on Monday. Follow up if he does not respond.', 'Gregory Friday-nu munpe TechX proposal ayakkan paranju.']
+    ? ['Hi Vishnu,\nPlease send the final TechX host proposal before Friday.\nRegards,\nGregory', 'Anand said he will confirm TechX funding Monday.', 'Anand confirmed funding.', 'Gregory Friday-nu munpe TechX proposal ayakkan paranju.']
     : ['Client wants the website updated by Friday. Rahul will finish frontend and Anu will deploy.', 'Large orders require 50% advance payment.', 'Operations team is waiting for inventory confirmation before dispatch.']
+  const importInboxFile = async (file) => {
+    if (!file) return
+    const text = await file.text()
+    setCapture(text)
+    setCaptureType(file.name.endsWith('.eml') ? 'email' : 'import')
+  }
   return (
     <>
-      <Header title={mode === 'personal' ? 'What should Echo remember or act on?' : 'What should Echo understand about the business?'} subtitle="Paste a message, meeting note, WhatsApp export, personal thought, customer request, or operational update." />
+      <Header title={mode === 'personal' ? 'Smart Inbox' : 'Business Smart Inbox'} subtitle="Paste email, notes, meeting outcomes, WhatsApp exports, or files. Echo turns them into context, open loops, and suggested actions." />
       <section className="capture-box">
-        <div className="chips">{['thought', 'conversation', 'email', 'meeting', 'personal', 'import'].map((type) => <button key={type} className={captureType === type ? 'chip active' : 'chip'} onClick={() => setCaptureType(type)}>{type}</button>)}</div>
+        <div className="chips">{['email', 'conversation', 'meeting', 'thought', 'personal', 'import'].map((type) => <button key={type} className={captureType === type ? 'chip active' : 'chip'} onClick={() => setCaptureType(type)}>{type === 'email' ? 'Email Thread' : type}</button>)}</div>
         <textarea value={capture} onChange={(event) => setCapture(event.target.value)} placeholder="Capture -> Understand -> Connect -> Visualize -> Remember -> Act" />
         <div className="example-row">{examples.map((example) => <button key={example} onClick={() => setCapture(example)}>{example}</button>)}</div>
-        <button className="primary" onClick={submitCapture}><Send size={18} />Understand this</button>
+        <div className="button-row"><button className="primary" onClick={submitCapture}><Send size={18} />Understand this</button><label className="file-button"><Upload size={16} />Import Email / Notes<input type="file" accept=".eml,.txt,.md,.json" onChange={(event) => importInboxFile(event.target.files?.[0])} /></label></div>
       </section>
       {draftItem && <Confirmation item={draftItem} setItem={setDraftItem} saveDraft={saveDraft} contexts={contexts} people={people} />}
     </>
@@ -878,14 +998,18 @@ function Confirmation({ item, setItem, saveDraft, contexts }) {
   return (
     <motion.section className="confirmation" initial={{ scale: 0.98, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}>
       <Header title="Echo understood this" subtitle="Review the structured memory before it joins your context graph." />
+      {item.processingError && <p className="form-error">{item.processingError}</p>}
       <div className="form-grid">
         <Label label="Summary"><input value={item.summary} onChange={(e) => update('summary', e.target.value)} /></Label>
         <Label label="Context"><select value={item.contextIds[0] || ''} onChange={(e) => update('contextIds', [e.target.value])}>{contexts.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></Label>
         <Label label="Deadline"><input type="date" value={item.deadline || ''} onChange={(e) => update('deadline', e.target.value || null)} /></Label>
         <Label label="Action"><input value={item.action || ''} onChange={(e) => update('action', e.target.value)} /></Label>
+        <Label label="Waiting on"><input value={item.waitingOn || ''} onChange={(e) => update('waitingOn', e.target.value || null)} /></Label>
+        <Label label="Promised to"><input value={item.promisedTo || ''} onChange={(e) => update('promisedTo', e.target.value || null)} /></Label>
         <Label label="Priority"><select value={item.priority} onChange={(e) => update('priority', e.target.value)}><option>low</option><option>medium</option><option>high</option></select></Label>
         <Label label="Status"><select value={item.status} onChange={(e) => update('status', e.target.value)}><option>open</option><option>completed</option><option>waiting</option><option>snoozed</option></select></Label>
       </div>
+      <p className="summary">Confidence: {Math.round((item.confidence || 0.72) * 100)}% · Source: {item.sourceType}</p>
       <div className="suggested-list">{item.suggestedActions.map((action) => <span key={action}>{action.replaceAll('_', ' ')}</span>)}</div>
       <button className="primary" onClick={saveDraft}><Check size={18} />Save to Echo</button>
     </motion.section>
@@ -964,15 +1088,16 @@ function ContextDrawer({ data, contextItem, items, contexts, openContextEditor, 
 function LooseEnds({ data, items, openAction, createReminder, updateStatus, deleteTask }) {
   const loose = detectLooseEnds(items)
   const sections = [
-    ['Promises I made', loose.filter((entry) => entry.itemType === 'promise')],
-    ['Waiting on someone', loose.filter((entry) => entry.status === 'waiting')],
-    ['People waiting on me', loose.filter((entry) => entry.peopleIds.length && entry.status === 'open')],
-    ['Unfinished decisions', loose.filter((entry) => entry.itemType === 'decision')],
-    ['Forgotten ideas', loose.filter((entry) => ['idea', 'recommendation'].includes(entry.itemType))],
+    ['I owe someone', loose.filter((entry) => entry.itemType === 'promise' || entry.promisedTo || (entry.peopleIds.length && entry.status === 'open'))],
+    ['Someone owes me', loose.filter((entry) => entry.status === 'waiting' || entry.waitingOn)],
+    ['I owe myself', loose.filter((entry) => !entry.peopleIds.length && entry.status === 'open' && entry.itemType === 'task')],
+    ['Unresolved decision', loose.filter((entry) => entry.itemType === 'decision')],
+    ['Deadline approaching', loose.filter((entry) => entry.deadline)],
+    ['Needs response', loose.filter((entry) => entry.sourceType === 'email' && entry.status === 'open')],
   ]
   return (
     <>
-      <Header title="Things that may have slipped through" subtitle="Echo turns unfinished loops into visible next actions." />
+      <Header title="Open Loops" subtitle="Echo turns scattered requests, waiting states, and unresolved decisions into visible loops you can close." />
       <div className="loose-stack">{sections.map(([title, list]) => <Panel key={title} title={title} icon={Archive}>{list.length ? list.map((entry) => <LooseCard key={entry.id} item={entry} data={data} openAction={openAction} createReminder={createReminder} updateStatus={updateStatus} deleteTask={deleteTask} />) : <p className="empty">Nothing here right now.</p>}</Panel>)}</div>
     </>
   )
@@ -1025,8 +1150,45 @@ function MemoryGarden({ mode, data, contexts, addMemory, editMemory, waterMemory
       <section className="garden-canvas">
         {memories.length ? memories.map((entry, index) => <MemoryPlant key={entry.id} memory={entry} data={data} image={images[entry.id]} index={index} onOpen={() => openMemory(entry)} />) : <p className="empty">No plants yet. Add one memory and this garden starts breathing.</p>}
       </section>
+      {mode === 'personal' && <PhotoJourneys data={data} images={images} />}
       <MemoryDrawer memoryValue={selected} image={selected ? images[selected.id] : null} data={data} close={() => setSelectedId(null)} editMemory={editMemory} waterMemory={waterMemory} deleteMemory={deleteMemory} />
     </>
+  )
+}
+
+function PhotoJourneys({ data, images }) {
+  const journey = data.journeys?.find((entry) => entry.mode === 'personal')
+  const [activeStop, setActiveStop] = useState(0)
+  const [playing, setPlaying] = useState(false)
+  const [audioUrl, setAudioUrl] = useState(journey?.audioDataUrl || '')
+  const audioRef = useRef(null)
+  if (!journey) return null
+  const stops = journey.stops || []
+  const progress = stops.length > 1 ? (activeStop / (stops.length - 1)) * 100 : 0
+  const memoryImage = images[journey.memoryIds?.[activeStop]]
+  const toggle = () => {
+    setPlaying((current) => !current)
+    if (audioRef.current) {
+      playing ? audioRef.current.pause() : audioRef.current.play().catch(() => {})
+    }
+  }
+  const importAudio = async (file) => {
+    if (!file) return
+    setAudioUrl(await fileToDataUrl(file))
+  }
+  return (
+    <section className="journey-panel">
+      <Header title="Photo Journeys" subtitle="A symbolic memory road through moments, photos, captions, and music." />
+      <div className="journey-stage">
+        <div className="journey-road"><motion.div className="journey-car" animate={{ left: `${progress}%` }} transition={{ duration: 0.5 }}><span /></motion.div>{stops.map((stop, index) => <button key={stop.id} className={`journey-stop ${activeStop === index ? 'active' : ''}`} style={{ left: `${stops.length > 1 ? (index / (stops.length - 1)) * 100 : 50}%` }} onClick={() => setActiveStop(index)}><span /></button>)}</div>
+        <article className="journey-card">
+          {memoryImage ? <img src={memoryImage} alt="" /> : <div className="journey-placeholder"><Map /><span>{journey.title}</span></div>}
+          <div><strong>{stops[activeStop]?.title}</strong><p>{stops[activeStop]?.caption}</p><small>{stops[activeStop]?.location} · {stops[activeStop]?.date}</small></div>
+        </article>
+        <div className="button-row"><button onClick={() => setActiveStop((activeStop + 1) % stops.length)}><ChevronRight size={16} />Next stop</button><button onClick={toggle}>{playing ? 'Pause Music' : 'Play Music'}</button><label className="file-button">Add Music<input type="file" accept="audio/*" onChange={(event) => importAudio(event.target.files?.[0])} /></label></div>
+        {audioUrl && <audio ref={audioRef} src={audioUrl} controls />}
+      </div>
+    </section>
   )
 }
 
@@ -1054,10 +1216,15 @@ function AskEcho({ question, setQuestion, ask, answer, data, mode, createReminde
 }
 
 function Connectors({ data, setImportModal }) {
+  const groups = [
+    ['Connected', data.connectors.filter((entry) => entry.status === 'connected')],
+    ['Import-Based', data.connectors.filter((entry) => ['manual', 'local-files', 'email-import', 'whatsapp', 'keep'].includes(entry.id) && entry.status !== 'connected')],
+    ['Coming Later', data.connectors.filter((entry) => entry.status === 'coming_soon')],
+  ]
   return (
     <>
-      <Header title="Connectors" subtitle="Echo can already import manually and from local files. Live integrations are clearly marked for future work." />
-      <section className="connector-grid">{data.connectors.map((entry) => <article key={entry.id} className="connector-card"><div><strong>{entry.name}</strong><Status status={entry.status} /></div><p>{entry.description}</p>{['manual', 'local-files', 'whatsapp', 'keep'].includes(entry.id) ? <button className="secondary" onClick={() => setImportModal(true)}><Upload size={16} />Import</button> : <button className="secondary" disabled>OAuth integration required</button>}</article>)}</section>
+      <Header title="Connectors" subtitle="Echo only marks integrations connected when they actually work in this app. Everything else is import-based or future OAuth work." />
+      {groups.map(([title, connectors]) => connectors.length > 0 && <section key={title} className="connector-section"><h2>{title}</h2><div className="connector-grid">{connectors.map((entry) => <article key={entry.id} className="connector-card"><div><strong>{entry.name}</strong><Status status={entry.status} /></div><p>{entry.description}</p>{['manual', 'local-files', 'email-import', 'whatsapp', 'keep'].includes(entry.id) ? <button className="secondary" onClick={() => setImportModal(true)}><Upload size={16} />Import</button> : <button className="secondary" disabled>OAuth integration required</button>}</article>)}</div></section>)}
     </>
   )
 }
@@ -1086,7 +1253,17 @@ function SettingsScreen({ data, update, mutate, exportData, importData, clearDem
           <button className="secondary" onClick={checkOllama}><RefreshCw size={16} />Check Ollama connection</button>
           {ollamaStatus && <p className="summary">{ollamaStatus}</p>}
           {models.length > 0 && <Label label="Installed model"><select value={data.ollamaModel} onChange={(e) => update({ ollamaModel: e.target.value })}>{models.map((model) => <option key={model}>{model}</option>)}</select></Label>}
+          <div className="usage-panel"><strong>AI usage this session</strong><p>Provider: {data.aiProvider}</p><p>Calls: {data.aiUsage?.callsThisSession || 0}</p><p>Last analysis: {data.aiUsage?.lastAnalysisAt ? format(parseISO(data.aiUsage.lastAnalysisAt), 'PPp') : 'Not yet'}</p></div>
           <p className="privacy">Your data stays in your browser in Demo Mode. When Ollama is selected, AI processing uses your local model if available. With cloud AI, selected content may be sent to the configured provider.</p>
+        </Panel>
+        <Panel title="WhatsApp Reminders" icon={Bell}>
+          <p className="summary">Automatic WhatsApp sending is not configured. Echo can prepare a message and open WhatsApp for manual send.</p>
+          <div className="form-grid">
+            <Label label="Country code"><input value={data.whatsappSettings?.countryCode || ''} onChange={(e) => update({ whatsappSettings: { ...data.whatsappSettings, countryCode: e.target.value } })} /></Label>
+            <Label label="Phone number"><input value={data.whatsappSettings?.phoneNumber || ''} onChange={(e) => update({ whatsappSettings: { ...data.whatsappSettings, phoneNumber: e.target.value } })} /></Label>
+            <Label label="Preferred reminder time"><input type="time" value={data.whatsappSettings?.preferredReminderTime || '18:00'} onChange={(e) => update({ whatsappSettings: { ...data.whatsappSettings, preferredReminderTime: e.target.value } })} /></Label>
+            <Label label="Status"><input value={data.whatsappSettings?.status === 'manual_send' ? 'Manual Send' : 'Not Configured'} readOnly /></Label>
+          </div>
         </Panel>
         <Panel title="Data" icon={Download}>
           <div className="button-row"><button onClick={exportData}><Download size={16} />Export Echo Data</button><label className="file-button"><Upload size={16} />Import Echo Data<input type="file" accept="application/json" onChange={(e) => importData(e.target.files?.[0])} /></label><button onClick={() => clearDemo('personal')}><Trash2 size={16} />Clear Personal Demo</button><button onClick={() => clearDemo('business')}><Trash2 size={16} />Clear Business Demo</button><button className="danger" onClick={clearAll}><Trash2 size={16} />Clear All Local Data</button></div>
@@ -1121,7 +1298,7 @@ function ImportModal({ open, close, data, mutate, mode }) {
         <button className="icon-close" onClick={close}>x</button>
         <Header title="Add My Context" subtitle="Paste notes, import JSON, or upload TXT, MD, JSON, or WhatsApp exports." />
         <div className="chips">{['Paste Text', 'Upload File', 'Paste Notes', 'Import JSON', 'Connect Source'].map((entry) => <button key={entry} className={kind === entry ? 'chip active' : 'chip'} onClick={() => setKind(entry)}>{entry}</button>)}</div>
-        {kind === 'Upload File' || kind === 'Import JSON' ? <label className="upload-zone"><Upload />Upload TXT, MD, JSON, or WhatsApp export<input type="file" accept=".txt,.md,.json" onChange={(e) => importFile(e.target.files?.[0])} /></label> : <textarea value={text} onChange={(event) => setText(event.target.value)} placeholder="I am the chair of IEEE TechX. Gregory handles proposals. Anand is coordinating funding. Host applications close on August 7..." />}
+        {kind === 'Upload File' || kind === 'Import JSON' ? <label className="upload-zone"><Upload />Upload EML, TXT, MD, JSON, or WhatsApp export<input type="file" accept=".eml,.txt,.md,.json" onChange={(e) => importFile(e.target.files?.[0])} /></label> : <textarea value={text} onChange={(event) => setText(event.target.value)} placeholder="I am the chair of IEEE TechX. Gregory handles proposals. Anand is coordinating funding. Host applications close on August 7..." />}
         <button className="primary" onClick={analyze}><Sparkles size={18} />Analyze Context</button>
         {preview && <ImportPreview preview={preview} confirm={confirm} />}
       </motion.div>
@@ -1141,6 +1318,28 @@ function ImportPreview({ preview, confirm }) {
       </div>
       <button className="primary" onClick={confirm}><Plus size={18} />Add to My Life</button>
     </section>
+  )
+}
+
+function ResolutionPrompt({ candidate, data, close, resolveLoop }) {
+  if (!candidate) return null
+  return (
+    <div className="modal-backdrop" onClick={close}>
+      <motion.div className="modal resolution-modal" onClick={(event) => event.stopPropagation()} initial={{ y: 30, opacity: 0 }} animate={{ y: 0, opacity: 1 }}>
+        <button className="icon-close" onClick={close}>x</button>
+        <Header title="Echo noticed this may close a loop" subtitle="New information appears to resolve an older waiting item. You stay in control." />
+        <article className="resolution-card">
+          <span>New evidence</span>
+          <strong>{candidate.newItem.rawText}</strong>
+        </article>
+        <article className="resolution-card">
+          <span>Possible loop to close</span>
+          <strong>{candidate.oldItem.summary}</strong>
+          <p>{contextNames(data.contexts, candidate.oldItem.contextIds).join(', ')} · {names(data.people, candidate.oldItem.peopleIds).join(', ') || candidate.oldItem.waitingOn || 'No person'}</p>
+        </article>
+        <div className="button-row"><button className="primary" onClick={() => resolveLoop(candidate.oldItem.id)}><Check size={16} />Close Loop</button><button onClick={close}>Keep Open</button></div>
+      </motion.div>
+    </div>
   )
 }
 
@@ -1236,25 +1435,27 @@ function ActionPanel({ panel, setPanel, data, createReminder, createCalendar, up
   const { type = 'draft_email', item: targetItem } = panel
   const recipient = names(data.people, targetItem.peopleIds)[0] || 'there'
   const draft = `Hi ${recipient},\n\nI'm following up on ${targetItem.summary.toLowerCase()}. Please let me know if any additional details are required.\n\nBest,\nVishnu`
-  const whatsapp = `Hi ${recipient}, ${targetItem.summary}. Please let me know if anything else is needed.`
+  const whatsapp = type === 'whatsapp_reminder' ? buildReminderMessage(targetItem, data) : `Hi ${recipient}, ${targetItem.summary}. Please let me know if anything else is needed.`
+  const phone = `${data.whatsappSettings?.countryCode || ''}${data.whatsappSettings?.phoneNumber || ''}`.replace(/\D/g, '')
+  const waUrl = phone ? `https://wa.me/${phone}?text=${encodeURIComponent(whatsapp)}` : `https://wa.me/?text=${encodeURIComponent(whatsapp)}`
   return (
     <div className="modal-backdrop" onClick={() => setPanel(null)}>
       <motion.div className="modal" onClick={(event) => event.stopPropagation()} initial={{ y: 30, opacity: 0 }} animate={{ y: 0, opacity: 1 }}>
         <button className="icon-close" onClick={() => setPanel(null)}>x</button>
-        <Header title={type === 'calendar' ? 'Calendar event prepared' : type === 'whatsapp' ? 'WhatsApp message prepared' : 'Email draft'} subtitle={targetItem.summary} />
-        {type === 'calendar' ? <div className="form-grid"><Label label="Event title"><input value={targetItem.action || targetItem.summary} readOnly /></Label><Label label="Date"><input value={targetItem.deadline || format(addDays(new Date(), 1), 'yyyy-MM-dd')} readOnly /></Label><Label label="Time"><input value="09:30" readOnly /></Label></div> : <textarea className="draft-text" value={type === 'whatsapp' ? whatsapp : draft} readOnly />}
-        <div className="button-row"><button onClick={() => navigator.clipboard?.writeText(type === 'whatsapp' ? whatsapp : draft)}><Clipboard size={16} />Copy {type === 'whatsapp' ? 'Message' : 'Draft'}</button><button onClick={() => createReminder(targetItem)}><Bell size={16} />Create Reminder</button><button onClick={() => createCalendar(targetItem)}><CalendarPlus size={16} />Calendar</button><button onClick={() => updateStatus(targetItem.id, 'completed')}><Check size={16} />Mark as Sent</button></div>
+        <Header title={type === 'calendar' ? 'Calendar event prepared' : type === 'whatsapp' || type === 'whatsapp_reminder' ? 'WhatsApp message prepared' : 'Email draft'} subtitle={type === 'whatsapp_reminder' ? 'Automatic WhatsApp sending is not configured. Open WhatsApp to send this reminder manually.' : targetItem.summary} />
+        {type === 'calendar' ? <div className="form-grid"><Label label="Event title"><input value={targetItem.action || targetItem.summary} readOnly /></Label><Label label="Date"><input value={targetItem.deadline || format(addDays(new Date(), 1), 'yyyy-MM-dd')} readOnly /></Label><Label label="Time"><input value="09:30" readOnly /></Label></div> : <textarea className="draft-text" value={type === 'whatsapp' || type === 'whatsapp_reminder' ? whatsapp : draft} readOnly />}
+        <div className="button-row"><button onClick={() => navigator.clipboard?.writeText(type === 'whatsapp' || type === 'whatsapp_reminder' ? whatsapp : draft)}><Clipboard size={16} />Copy {type === 'whatsapp' || type === 'whatsapp_reminder' ? 'Message' : 'Draft'}</button>{(type === 'whatsapp' || type === 'whatsapp_reminder') && <a className="button-link" href={waUrl} target="_blank" rel="noreferrer">Open WhatsApp to send</a>}<button onClick={() => createReminder(targetItem)}><Bell size={16} />Create Reminder</button><button onClick={() => createCalendar(targetItem)}><CalendarPlus size={16} />Calendar</button><button onClick={() => updateStatus(targetItem.id, 'completed')}><Check size={16} />Mark as Sent</button></div>
       </motion.div>
     </div>
   )
 }
 
 function ActionCard({ item: targetItem, data, openAction, createReminder, updateStatus }) {
-  return <article className="action-card"><strong>{targetItem.summary}</strong><p>Context: {contextNames(data.contexts, targetItem.contextIds).join(', ')}</p><p>People: {names(data.people, targetItem.peopleIds).join(', ') || 'No person attached'}</p><p>Deadline: {deadlineLabel(targetItem.deadline)}</p><div className="button-row"><button onClick={() => openAction({ type: 'draft_email', item: targetItem })}><Mail size={16} />Draft Email</button><button onClick={() => createReminder(targetItem)}><Bell size={16} />Create Reminder</button><button onClick={() => updateStatus(targetItem.id, 'completed')}><Check size={16} />Mark Complete</button></div></article>
+  return <article className="action-card"><strong>{targetItem.summary}</strong><p>Context: {contextNames(data.contexts, targetItem.contextIds).join(', ')}</p><p>People: {names(data.people, targetItem.peopleIds).join(', ') || 'No person attached'}</p><p>Deadline: {deadlineLabel(targetItem.deadline)}</p>{targetItem.reason && <p>Evidence: {targetItem.reason}</p>}<div className="button-row"><button onClick={() => openAction({ type: 'draft_email', item: targetItem })}><Mail size={16} />Draft Email</button><button onClick={() => createReminder(targetItem)}><Bell size={16} />In-App Reminder</button><button onClick={() => createReminder(targetItem, 'whatsapp')}><Bell size={16} />WhatsApp Reminder</button><button onClick={() => updateStatus(targetItem.id, 'completed')}><Check size={16} />Mark Complete</button></div></article>
 }
 
 function LooseCard({ item: targetItem, data, openAction, createReminder, updateStatus, deleteTask }) {
-  return <article className="loose-card"><div><strong>{targetItem.rawText}</strong><p>{contextNames(data.contexts, targetItem.contextIds).join(', ')} · {names(data.people, targetItem.peopleIds).join(', ') || 'No person'} · {format(parseISO(targetItem.createdAt), 'MMM d')}</p><span>{targetItem.reason}</span></div><div className="button-row"><button onClick={() => updateStatus(targetItem.id, 'completed')}><Check size={16} />Complete</button><button onClick={() => openAction({ type: 'draft_email', item: targetItem })}><Mail size={16} />Draft Response</button><button onClick={() => createReminder(targetItem)}><Bell size={16} />Reminder</button><button onClick={() => updateStatus(targetItem.id, 'snoozed')}><PanelLeftClose size={16} />Snooze</button><button className="danger" onClick={() => deleteTask(targetItem.id)}><Trash2 size={16} />Delete</button></div></article>
+  return <article className="loose-card"><div><strong>{targetItem.rawText}</strong><p>{contextNames(data.contexts, targetItem.contextIds).join(', ')} · {names(data.people, targetItem.peopleIds).join(', ') || 'No person'} · {format(parseISO(targetItem.createdAt), 'MMM d')}</p><span>{targetItem.reason}</span></div><div className="button-row"><button onClick={() => updateStatus(targetItem.id, 'completed')}><Check size={16} />Complete</button><button onClick={() => openAction({ type: 'draft_email', item: targetItem })}><Mail size={16} />Draft Response</button><button onClick={() => createReminder(targetItem)}><Bell size={16} />Reminder</button><button onClick={() => createReminder(targetItem, 'whatsapp')}><Bell size={16} />WhatsApp</button><button onClick={() => updateStatus(targetItem.id, 'snoozed')}><PanelLeftClose size={16} />Snooze</button><button className="danger" onClick={() => deleteTask(targetItem.id)}><Trash2 size={16} />Delete</button></div></article>
 }
 
 function Memory({ item: targetItem, data, openAction, createReminder }) {
@@ -1467,30 +1668,143 @@ function chooseContexts(text, data, mode) {
   return [contexts[0]?.id].filter(Boolean)
 }
 
+function looksLikeEmail(text) {
+  return /(^|\n)(from:|to:|subject:|regards,|hi vishnu|dear vishnu)/i.test(text)
+}
+
+function analyzeEmailThread(text, data, mode) {
+  const lower = text.toLowerCase()
+  const contextIds = chooseContexts(text, data, mode)
+  const peopleResult = detectPeople(text, data.people)
+  const deadline = detectDeadline(text)
+  const sourceId = `thread-${hashText(text)}`
+  const gregoryId = data.people.find((entry) => entry.name === 'Gregory')?.id
+  const anandId = data.people.find((entry) => entry.name === 'Anand')?.id
+  const isGregoryProposal = /gregory/.test(lower) && /(proposal|techx|host)/.test(lower) && /(send|please send|before)/.test(lower)
+  const isAnandWaiting = /anand/.test(lower) && /(confirm|funding)/.test(lower) && !/(confirmed|approved|done|resolved)/.test(lower)
+  const isResolution = /(confirmed|approved|resolved|done|sent|completed|closed)/.test(lower)
+  const needsReply = looksLikeEmail(text) && /(please|can you|send|confirm|reply|update)/.test(lower)
+  let summary = ''
+  let itemType = detectItemType(text)
+  let status = 'open'
+  let waitingOn = null
+  let promisedTo = null
+  let reason = needsReply ? 'Email thread appears to need your response.' : 'Echo found a possible next action.'
+
+  if (isGregoryProposal) {
+    summary = 'Send Gregory the final TechX host proposal'
+    itemType = 'promise'
+    promisedTo = 'Gregory'
+    reason = 'Gregory requested the TechX host proposal in an email thread.'
+  } else if (isAnandWaiting) {
+    summary = 'Wait for Anand to confirm TechX funding'
+    itemType = 'waiting'
+    status = 'waiting'
+    waitingOn = 'Anand'
+    reason = 'Anand owns the next update on funding.'
+  } else if (isResolution && /anand|funding/.test(lower)) {
+    summary = 'Anand confirmed TechX funding'
+    itemType = 'information'
+    status = 'open'
+    waitingOn = null
+    reason = 'This may resolve an older funding waiting loop.'
+  }
+
+  return {
+    sourceId,
+    contextIds,
+    peopleIds: [gregoryId && /gregory/.test(lower) ? gregoryId : null, anandId && /anand/.test(lower) ? anandId : null, ...peopleResult.ids].filter(Boolean),
+    itemType,
+    summary,
+    deadline,
+    status,
+    waitingOn,
+    promisedTo,
+    relatedItemIds: relevantItemsForText(text, data, mode).map((entry) => entry.id),
+    reason,
+    confidence: summary ? 0.9 : 0.72,
+  }
+}
+
+function relevantItemsForText(text, data, mode) {
+  const lower = text.toLowerCase()
+  const tokens = lower.split(/\W+/).filter((token) => token.length > 3)
+  return data.items
+    .filter((entry) => entry.mode === mode && entry.status !== 'completed')
+    .map((entry) => {
+      const haystack = `${entry.rawText} ${entry.summary} ${contextNames(data.contexts, entry.contextIds).join(' ')} ${names(data.people, entry.peopleIds).join(' ')}`.toLowerCase()
+      const score = tokens.reduce((sum, token) => sum + (haystack.includes(token) ? 1 : 0), 0)
+      return { entry, score }
+    })
+    .filter(({ score }) => score > 1)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5)
+    .map(({ entry }) => entry)
+}
+
+function findResolutionCandidate(newItem, data) {
+  if (!newItem || !/(confirmed|approved|resolved|done|sent|completed|closed)/i.test(newItem.rawText)) return null
+  const candidates = relevantItemsForText(newItem.rawText, data, newItem.mode)
+  return candidates.find((entry) => entry.id !== newItem.id && entry.status === 'waiting') || null
+}
+
+function suggestedReminderDate(targetItem) {
+  if (!targetItem.deadline) return format(addDays(new Date(), 1), 'yyyy-MM-dd')
+  const due = parseISO(targetItem.deadline)
+  const before = addDays(due, -1)
+  return format(isBefore(before, new Date()) ? due : before, 'yyyy-MM-dd')
+}
+
+function buildReminderMessage(targetItem, data) {
+  const context = contextNames(data.contexts, targetItem.contextIds).join(', ') || 'Echo'
+  const date = targetItem.deadline ? ` before ${deadlineLabel(targetItem.deadline)}` : ''
+  return `Reminder from Echo: ${targetItem.summary}${date}. Context: ${context}.`
+}
+
+function hashText(text) {
+  let hash = 0
+  for (let i = 0; i < text.length; i += 1) hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0
+  return Math.abs(hash).toString(36)
+}
+
 async function extractMemory(input, sourceType, data) {
   const mode = data.activeMode
-  const itemType = detectItemType(input)
+  const emailState = analyzeEmailThread(input, data, mode)
+  const itemType = emailState.itemType || detectItemType(input)
   const peopleResult = detectPeople(input, data.people)
-  const contextIds = chooseContexts(input, data, mode)
+  const contextIds = emailState.contextIds.length ? emailState.contextIds : chooseContexts(input, data, mode)
   const lower = input.toLowerCase()
-  const summary = peopleResult.ids.includes('person-anand') && lower.includes('funding') ? 'Wait for Anand to confirm the TechX funding status' : input.replace(/[“”"]/g, '').replace(/\.$/, '')
+  const summary = emailState.summary || (peopleResult.ids.includes('person-anand') && lower.includes('funding') ? 'Wait for Anand to confirm the TechX funding status' : input.replace(/[“”"]/g, '').replace(/\.$/, ''))
+  const deadline = emailState.deadline || detectDeadline(input)
+  const status = emailState.status || (/(waiting|confirm|will confirm|said he will|said he would|respond)/i.test(input) ? 'waiting' : 'open')
+  const peopleIds = [...new Set([...peopleResult.ids, ...emailState.peopleIds])]
   return echoItemSchema.parse({
     id: uid('item'),
     rawText: input,
     summary,
-    sourceType,
+    sourceType: sourceType === 'unknown' && looksLikeEmail(input) ? 'email' : sourceType,
     itemType,
     mode,
+    sourceId: emailState.sourceId,
+    context: contextNames(data.contexts, [contextIds[0]]).join(', ') || '',
+    subContext: contextNames(data.contexts, [contextIds[1]]).join(', ') || null,
+    people: names(data.people, peopleIds),
+    organizations: contextIds.includes('ctx-ieee') ? ['IEEE'] : [],
     contextIds,
-    peopleIds: peopleResult.ids,
-    deadline: detectDeadline(input),
+    peopleIds,
+    deadline,
     action: summary,
-    reason: /(waiting|confirm|will confirm|said he will|said he would|respond)/i.test(input) ? 'You are waiting on someone.' : 'Echo found a possible next action.',
-    priority: detectDeadline(input) ? 'high' : 'medium',
-    status: /(waiting|confirm|will confirm|said he will|said he would|respond)/i.test(input) ? 'waiting' : 'open',
-    suggestedActions: suggestedActions(itemType, detectDeadline(input), peopleResult.ids),
+    decision: itemType === 'decision' ? summary : null,
+    reason: emailState.reason || (status === 'waiting' ? 'You are waiting on someone.' : 'Echo found a possible next action.'),
+    waitingOn: emailState.waitingOn,
+    promisedTo: emailState.promisedTo,
+    relatedItemIds: emailState.relatedItemIds,
+    confidence: emailState.confidence,
+    priority: deadline ? 'high' : 'medium',
+    status,
+    suggestedActions: suggestedActions(itemType, deadline, peopleIds),
     language: detectLanguage(input),
-    source: 'manual',
+    source: sourceType === 'email' || looksLikeEmail(input) ? 'email-import' : 'manual',
     createdAt: now(),
   })
 }
@@ -1511,6 +1825,41 @@ function addExtractedItem(data, extracted) {
   const peopleResult = detectPeople(extracted.rawText, data.people)
   const newPeople = peopleResult.newNames.map((name) => person(uid('person'), name))
   return { ...data, people: [...data.people, ...newPeople], items: [{ ...extracted, peopleIds: [...extracted.peopleIds, ...newPeople.map((entry) => entry.id)] }, ...data.items] }
+}
+
+function fallbackFailedItem(input, sourceType, data, error) {
+  const mode = data.activeMode
+  const contextIds = chooseContexts(input, data, mode)
+  return {
+    id: uid('item'),
+    rawText: input,
+    summary: input.slice(0, 120) || 'Unprocessed capture',
+    sourceType,
+    itemType: 'information',
+    mode,
+    sourceId: null,
+    context: contextNames(data.contexts, [contextIds[0]]).join(', ') || '',
+    subContext: null,
+    people: [],
+    organizations: [],
+    contextIds,
+    peopleIds: [],
+    deadline: null,
+    action: null,
+    decision: null,
+    reason: 'Processing error. Please review and edit before saving.',
+    waitingOn: null,
+    promisedTo: null,
+    relatedItemIds: [],
+    confidence: 0.2,
+    priority: 'medium',
+    status: 'open',
+    suggestedActions: ['add_to_context'],
+    language: detectLanguage(input),
+    source: 'manual',
+    processingError: error?.message || 'Echo could not structure this input automatically.',
+    createdAt: now(),
+  }
 }
 
 async function extractContext(text, data, mode, sourceType) {
@@ -1555,17 +1904,25 @@ async function askEcho(question, data, mode) {
   const tokens = q.split(/\W+/).filter((token) => token.length > 2)
   const candidateItems = data.items.filter((entry) => mode === 'personal' ? entry.mode === 'personal' : entry.mode === 'business')
   const scored = candidateItems.map((entry) => {
-    const haystack = `${entry.rawText} ${entry.summary} ${contextNames(data.contexts, entry.contextIds).join(' ')} ${names(data.people, entry.peopleIds).join(' ')} ${entry.itemType} ${entry.status}`.toLowerCase()
+    const itemContexts = contextNames(data.contexts, entry.contextIds)
+    const haystack = `${entry.rawText} ${entry.summary} ${itemContexts.join(' ')} ${names(data.people, entry.peopleIds).join(' ')} ${entry.itemType} ${entry.status}`.toLowerCase()
     let score = tokens.reduce((sum, token) => sum + (haystack.includes(token) ? 2 : 0), 0)
+    if (itemContexts.some((contextName) => q.includes(contextName.toLowerCase()))) score += 5
+    if (/(block|blocking|stuck|risk|focus)/.test(q) && (entry.status === 'waiting' || entry.deadline || entry.priority === 'high')) score += 4
     if (q.includes('waiting') && entry.status === 'waiting') score += 5
     if (q.includes('promise') && entry.itemType === 'promise') score += 4
     if (entry.deadline) score += 1
     return { entry, score }
   }).filter(({ score }) => score > 2).sort((a, b) => b.score - a.score).slice(0, 5)
   if (!scored.length) return { answer: 'Echo does not have enough context for that yet.', relevantItemIds: [], found: false, suggestedNextAction: null }
-  const top = scored[0].entry
-  const people = names(data.people, top.peopleIds)
-  return { answer: top.status === 'waiting' ? `You are waiting for ${people[0] || 'someone'} to confirm: ${top.summary}.` : `The strongest answer is: ${top.summary}.`, relevantItemIds: scored.map(({ entry }) => entry.id), found: true, suggestedNextAction: top.deadline ? 'Create a reminder so this does not drift.' : 'Open the connected context and close the next loop.' }
+  const relevant = scored.map(({ entry }) => entry)
+  const waiting = relevant.filter((entry) => entry.status === 'waiting' || entry.waitingOn)
+  const owed = relevant.filter((entry) => entry.status === 'open' && (entry.itemType === 'promise' || entry.promisedTo || entry.deadline))
+  const answerParts = []
+  if (waiting.length) answerParts.push(`You are waiting on ${waiting.map((entry) => entry.waitingOn || names(data.people, entry.peopleIds)[0] || 'someone').join(', ')} for ${waiting.map((entry) => entry.summary.toLowerCase()).join('; ')}.`)
+  if (owed.length) answerParts.push(`You still need to handle ${owed.map((entry) => entry.summary.toLowerCase()).join('; ')}.`)
+  if (!answerParts.length) answerParts.push(`The strongest matches are ${relevant.map((entry) => entry.summary.toLowerCase()).join('; ')}.`)
+  return { answer: answerParts.join(' '), relevantItemIds: relevant.map((entry) => entry.id), found: true, suggestedNextAction: relevant.some((entry) => entry.deadline) ? 'Create reminders for the dated loops and close any resolved waiting items.' : 'Open the connected context and close the next loop.', confidence: 0.84 }
 }
 
 function buildGraph(contexts, items, mode, expanded) {
