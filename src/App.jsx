@@ -596,7 +596,13 @@ function App() {
   const loadDemo = (demoMode = mode) => {
     mutate((current) => {
       const demoItems = demoMode === 'personal' ? demoPersonalItems() : demoBusinessItems()
-      return { ...current, items: [...current.items.filter((entry) => entry.source !== `demo-${demoMode}`), ...demoItems.map((demo) => ({ ...demo, source: `demo-${demoMode}` }))] }
+      const demoContextIds = new Set(demoItems.flatMap((entry) => entry.contextIds || []))
+      const missingDemoContexts = defaultData.contexts.filter((entry) => entry.mode === demoMode && demoContextIds.has(entry.id) && !current.contexts.some((contextEntry) => contextEntry.id === entry.id))
+      return {
+        ...current,
+        contexts: [...current.contexts, ...missingDemoContexts],
+        items: [...current.items.filter((entry) => entry.source !== `demo-${demoMode}`), ...demoItems.map((demo) => ({ ...demo, source: `demo-${demoMode}` }))],
+      }
     })
     localStorage.setItem(demoMode === 'personal' ? STORE.demoPersonal : STORE.demoBusiness, 'true')
     setToast(demoMode === 'personal' ? 'Demo personal life loaded.' : 'Demo business context loaded.')
@@ -818,10 +824,13 @@ function App() {
     }
   }
 
-  const demoLoaded = localStorage.getItem(mode === 'personal' ? STORE.demoPersonal : STORE.demoBusiness) === 'true'
+  const demoFlagLoaded = localStorage.getItem(mode === 'personal' ? STORE.demoPersonal : STORE.demoBusiness) === 'true'
+  const demoItemCount = data.items.filter((entry) => entry.mode === mode && entry.source === `demo-${mode}`).length
+  const demoLoaded = demoFlagLoaded && demoItemCount > 0
+  const demoStale = demoFlagLoaded && demoItemCount === 0
   const HeaderAction = (
     <div className="top-actions">
-      <button className="primary" onClick={() => loadDemo(mode)} disabled={demoLoaded}><Sparkles size={18} />{demoLoaded ? 'Demo Data Loaded' : mode === 'personal' ? 'Load Demo Personal Life' : 'Load Demo Business'}</button>
+      <button className="primary" onClick={() => loadDemo(mode)} disabled={demoLoaded}><Sparkles size={18} />{demoLoaded ? 'Demo Data Loaded' : demoStale ? 'Reload Demo Data' : mode === 'personal' ? 'Load Demo Personal Life' : 'Load Demo Business'}</button>
       <button className="secondary" onClick={() => setImportModal(true)}><Plus size={18} />Add My Context</button>
     </div>
   )
